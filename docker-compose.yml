@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  warehouse-tools:
+    build: .
+    container_name: warehouse-tools
+    ports:
+      - "5000:5000"        # change left side to use a different host port
+    volumes:
+      - ./downloads:/app/downloads   # generated files survive restarts
+      - ./uploads:/app/uploads       # temp uploads survive restarts
+
+      # ── Map Sync ────────────────────────────────────────────────────
+      # Map Sync copies files to paths on the HOST.  Mount the root that
+      # contains your robot folders so the container can reach them.
+      # Uncomment and adjust the line below:
+      #
+      # - /path/on/vm/to/robots:/path/on/vm/to/robots
+      #
+      # The path must be the same inside and outside the container so
+      # the "Parent directory" field in the UI works without changes.
+      # ────────────────────────────────────────────────────────────────
+
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1

@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warehouse Tools — Nexus</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+<!-- ── App Shell ───────────────────────────────────────────── -->
+<div id="app">
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand-icon">⬡</span>
+      <span class="brand-title">Warehouse<span class="brand-accent">Tools</span></span>
+      <span class="live-dot"></span>
+    </div>
+    <div class="header-right">
+      <span class="go-name"><span class="go-grey">Grey</span><span class="go-orange">Orange</span></span>
+    </div>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-tab="each-pick" onclick="showTab('each-pick')">
+          <span class="nav-icon">⬡</span>
+          <span class="nav-label">Each Pick</span>
+        </button>
+        <button class="nav-item" data-tab="case-pick" onclick="showTab('case-pick')">
+          <span class="nav-icon">⟠</span>
+          <span class="nav-label">Case Pick</span>
+        </button>
+        <button class="nav-item" data-tab="point-to-point" onclick="showTab('point-to-point')">
+          <span class="nav-icon">⬣</span>
+          <span class="nav-label">Point to Point</span>
+        </button>
+        <button class="nav-item" data-tab="map-validator" onclick="showTab('map-validator')">
+          <span class="nav-icon">⬟</span>
+          <span class="nav-label">Map Validator</span>
+        </button>
+        <button class="nav-item" data-tab="orderfile" onclick="showTab('orderfile')">
+          <span class="nav-icon">▤</span>
+          <span class="nav-label">Orderfile Gen</span>
+        </button>
+        <button class="nav-item" data-tab="map-sync" onclick="showTab('map-sync')">
+          <span class="nav-icon">⟳</span>
+          <span class="nav-label">Map Sync</span>
+        </button>
+      </nav>
+      <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Toggle sidebar">
+        <span id="toggleIcon">‹</span>
+      </button>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+
+      <!-- ── TAB 1: Each Pick ──────────────────────────────── -->
+      <section class="tab-page active" id="tab-each-pick">
+        <div class="page-header">
+          <h1 class="page-title">Each Pick</h1>
+          <p class="page-sub">Extract WorkMarker / ResourceMarker coordinates to Excel</p>
+        </div>
+
+        <div class="card">
+          <div class="card-label">INPUT</div>
+          <div class="file-row">
+            <label class="file-label">Markers JSON / SMAP</label>
+            <div class="file-input-wrap">
+              <input type="file" id="ep-file" accept=".json,.smap" class="file-input" />
+              <label for="ep-file" class="file-btn">Browse</label>
+              <span class="file-name" id="ep-filename">No file selected</span>
+            </div>
+          </div>
+          <div class="option-row">
+            <label class="toggle-wrap">
+              <input type="checkbox" id="ep-work" checked />
+              <span class="toggle-label">WorkMarkers</span>
+            </label>
+            <label class="toggle-wrap">
+              <input type="checkbox" id="ep-resource" checked />
+              <span class="toggle-label">ResourceMarkers</span>
+            </label>
+          </div>
+          <div class="action-row">
+            <button class="btn-accent" id="ep-run-btn" onclick="runEachPick()">▶ Extract</button>
+          </div>
+        </div>
+
+        <div class="card" id="ep-result-card" style="display:none">
+          <div class="card-label">RESULT</div>
+          <div id="ep-download-row" class="download-row" style="display:none">
+            <a class="btn-success" id="ep-download-link" href="#" download>⬇ Download Excel</a>
+          </div>
+          <div class="log-box" id="ep-log"></div>
+        </div>
+      </section>
+
+      <!-- ── TAB 2: Case Pick ──────────────────────────────── -->
+      <section class="tab-page" id="tab-case-pick">
+        <div class="page-header">
+          <h1 class="page-title">Case Pick</h1>
+          <p class="page-sub">Generate pick sequences from warehouse map</p>
+        </div>
+
+        <!-- Step 1: Upload & Analyze -->
+        <div class="card">
+          <div class="card-label">STEP 1 — LOAD & ANALYZE</div>
+          <div class="file-row">
+            <label class="file-label">Map JSON / SMAP</label>
+            <div class="file-input-wrap">
+              <input type="file" id="cp-file" accept=".json,.smap" class="file-input" />
+              <label for="cp-file" class="file-btn">Browse</label>
+              <span class="file-name" id="cp-filename">No file selected</span>
+            </div>
+          </div>
+          <div class="file-row">
+            <label class="file-label">Map Path</label>
+            <div class="file-input-wrap">
+              <input type="text" class="text-input" id="cp-map-path"
+                     placeholder="Click 'Pick from Disk' to browse server filesystem and get the full path" />
+              <button class="btn-ghost" type="button"
+                      onclick="openServerPicker('cp-map-path', '.json,.smap')">📁 Pick from Disk</button>
+            </div>
+          </div>
+
+          <div class="option-grid">
+            <div class="option-group">
+              <label class="opt-label">Orientation</label>
+              <select class="select-input" id="cp-orientation">
+                <option value="horizontal">Horizontal</option>
+                <option value="vertical">Vertical</option>
+              </select>
+            </div>
+            <div class="option-group">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-cross-aisle" />
+                <span class="toggle-label">Auto Cross-Aisle</span>
+              </label>
+            </div>
+            <div class="option-group" id="cp-sensitivity-wrap" style="display:none">
+              <label class="opt-label">Sensitivity</label>
+              <input type="number" class="num-input" id="cp-sensitivity" value="1.5" min="0.5" max="5" step="0.1" />
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button class="btn-accent" id="cp-analyze-btn" onclick="analyzeCasePick()">⟠ Analyze</button>
+          </div>
+        </div>
+
+        <!-- MAP WINDOW — point tagging (loads as soon as file is selected) -->
+        <div class="card" id="cp-map-card" style="display:none">
+          <div class="card-label">MAP — TAG POINTS
+            <span style="float:right;font-size:10px;color:var(--text-lo);font-weight:400;text-transform:none;letter-spacing:0">
+              Left-click / drag to tag · Right-drag to pan · Scroll to zoom
+            </span>
+          </div>
+
+          <!-- Toolbar row 1: tag mode buttons + badges -->
+          <div class="map-toolbar">
+            <div class="tag-btn-group">
+              <button class="tag-btn" id="tag-btn-loading"     onclick="cpSetTagMode('loading')">L Loading</button>
+              <button class="tag-btn" id="tag-btn-unloading"   onclick="cpSetTagMode('unloading')">U Unloading</button>
+              <button class="tag-btn" id="tag-btn-cross_aisle" onclick="cpSetTagMode('cross_aisle')">+ Cross-Aisle</button>
+              <button class="tag-btn" id="tag-btn-remove"      onclick="cpSetTagMode('remove')">✕ Remove</button>
+            </div>
+            <div class="map-badges">
+              <span class="mbadge mbadge-l">L <span id="cp-load-count">0</span></span>
+              <span class="mbadge mbadge-u">U <span id="cp-unload-count">0</span></span>
+              <span class="mbadge mbadge-ca">CA <span id="cp-ca-count">0</span></span>
+              <span class="mbadge mbadge-x">✕ <span id="cp-excl-count">0</span></span>
+            </div>
+          </div>
+
+          <!-- Toolbar row 2: visibility toggles + actions -->
+          <div class="map-toolbar" style="margin-bottom:8px">
+            <div class="map-toggles">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-show-ap" checked onchange="cpRedraw()" />
+                <span class="toggle-label">APs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-show-lm" checked onchange="cpRedraw()" />
+                <span class="toggle-label">LMs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-show-labels" onchange="cpRedraw()" />
+                <span class="toggle-label">Labels</span>
+              </label>
+            </div>
+            <div class="action-row" style="margin:0">
+              <button class="btn-ghost" onclick="cpResetView()">⌖ Reset View</button>
+              <button class="btn-ghost" onclick="cpClearAll()">✕ Clear All Tags</button>
+            </div>
+          </div>
+
+          <!-- Canvas -->
+          <canvas id="cp-map-canvas" style="width:100%;height:420px;cursor:crosshair;display:block;background:#060e20;border-radius:6px;border:1px solid var(--border);"></canvas>
+        </div>
+
+        <!-- Aisle table (shown after analyze) -->
+        <div class="card" id="cp-aisles-card" style="display:none">
+          <div class="card-label">AISLES DETECTED — <span id="cp-aisle-count">0</span> aisles / <span id="cp-ap-count">0</span> APs</div>
+          <div class="table-wrap">
+            <table class="data-table" id="cp-aisle-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Aisle Name</th>
+                  <th>First AP</th>
+                  <th>Last AP</th>
+                  <th>Count</th>
+                  <th>Direction</th>
+                </tr>
+              </thead>
+              <tbody id="cp-aisle-tbody"></tbody>
+            </table>
+          </div>
+          <div class="action-row">
+            <button class="btn-ghost" onclick="setAllDirections('f2l')">All First→Last</button>
+            <button class="btn-ghost" onclick="setAllDirections('l2f')">All Last→First</button>
+          </div>
+        </div>
+
+        <!-- Output & Duplication -->
+        <div class="card" id="cp-output-card" style="display:none">
+          <div class="card-label">OUTPUT &amp; DUPLICATION</div>
+          <div class="file-row">
+            <label class="file-label">Template Excel (optional)</label>
+            <div class="file-input-wrap">
+              <input type="file" id="cp-template" accept=".xlsx" class="file-input" />
+              <label for="cp-template" class="file-btn">Browse</label>
+              <span class="file-name" id="cp-template-name">No file</span>
+            </div>
+          </div>
+          <div class="file-row">
+            <label class="file-label">Output Path</label>
+            <input type="text" class="text-input" id="cp-output-path"
+                   value="case_pick_sequence.xlsx"
+                   placeholder="C:\folder\out.xlsx — or just out.xlsx (saves next to map)" />
+          </div>
+          <div class="option-grid" style="margin-top:6px">
+            <div class="option-group">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-dup-enabled" onchange="onDupToggle()" />
+                <span class="toggle-label">Enable Duplication</span>
+              </label>
+            </div>
+            <div class="option-group" id="cp-dup-count-wrap" style="display:none">
+              <label class="opt-label">Count</label>
+              <input type="number" class="num-input" id="cp-dup-count" value="2" min="2" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Generate action -->
+        <div class="card" id="cp-action-card" style="display:none">
+          <div class="action-row">
+            <button class="btn-accent" id="cp-gen-btn" onclick="generateCasePick()">▶ Generate</button>
+          </div>
+        </div>
+
+        <!-- Result -->
+        <div class="card" id="cp-result-card" style="display:none">
+          <div class="card-label">RESULT</div>
+          <div id="cp-download-row" class="download-row" style="display:none">
+            <a class="btn-success" id="cp-download-link" href="#" download>⬇ Download Excel</a>
+          </div>
+          <div class="log-box" id="cp-log"></div>
+        </div>
+      </section>
+
+      <!-- ── TAB 3: Point to Point ─────────────────────────── -->
+      <section class="tab-page" id="tab-point-to-point">
+        <div class="page-header">
+          <h1 class="page-title">Point to Point</h1>
+          <p class="page-sub">Generate zone configuration JSON</p>
+        </div>
+
+        <div class="card">
+          <div class="card-label">INPUT FILES</div>
+          <div class="file-row">
+            <label class="file-label">Map JSON / SMAP</label>
+            <div class="file-input-wrap">
+              <input type="file" id="p2p-json" accept=".json,.smap" class="file-input" />
+              <label for="p2p-json" class="file-btn">Browse</label>
+              <span class="file-name" id="p2p-json-name">No file selected</span>
+            </div>
+          </div>
+          <div class="file-row">
+            <label class="file-label">Zone Config Excel</label>
+            <div class="file-input-wrap">
+              <input type="file" id="p2p-excel" accept=".xlsx" class="file-input" />
+              <label for="p2p-excel" class="file-btn">Browse</label>
+              <span class="file-name" id="p2p-excel-name">No file selected</span>
+            </div>
+            <a class="btn-ghost-sm" href="/api/sample-excel" download="sample_point_to_point.xlsx">⬇ Sample Excel</a>
+          </div>
+        </div>
+
+        <!-- MAP PREVIEW — auto-loads from the selected JSON/SMAP file -->
+        <div class="card" id="p2p-map-card" style="display:none">
+          <div class="card-label">MAP PREVIEW
+            <span style="float:right;font-size:10px;color:var(--text-lo);font-weight:400;text-transform:none;letter-spacing:0">
+              Drag to pan · Scroll to zoom
+            </span>
+          </div>
+          <div class="map-toolbar">
+            <div class="tag-btn-group">
+              <button class="tag-btn" id="p2p-draw-btn" type="button" onclick="p2pToggleDrawMode()">⬚ Draw Zone</button>
+            </div>
+            <span class="mbadge mbadge-l">Zones <span id="p2p-zone-count">0</span></span>
+          </div>
+          <div class="map-toolbar" style="margin-bottom:8px">
+            <div class="map-toggles">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="p2p-show-ap" checked onchange="p2pRedraw()" />
+                <span class="toggle-label">APs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="p2p-show-lm" checked onchange="p2pRedraw()" />
+                <span class="toggle-label">LMs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="p2p-show-labels" onchange="p2pRedraw()" />
+                <span class="toggle-label">Labels</span>
+              </label>
+            </div>
+            <div class="action-row" style="margin:0">
+              <button class="btn-ghost" onclick="p2pResetView()">⌖ Reset View</button>
+              <button class="btn-ghost" onclick="p2pClearZones()">✕ Clear Zones</button>
+            </div>
+          </div>
+          <canvas id="p2p-map-canvas" style="width:100%;height:420px;cursor:grab;display:block;background:#060e20;border-radius:6px;border:1px solid var(--border);"></canvas>
+        </div>
+
+        <!-- Drawn zones table -->
+        <div class="card" id="p2p-zones-card" style="display:none">
+          <div class="card-label">DRAWN ZONES</div>
+          <div class="table-wrap">
+            <table class="data-table" id="p2p-zones-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Zone Name</th>
+                  <th>Entry LM</th>
+                  <th>Exit LM</th>
+                  <th>min x</th><th>max x</th><th>min y</th><th>max y</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="p2p-zones-tbody"></tbody>
+            </table>
+          </div>
+          <label class="toggle-wrap" style="margin-top:10px">
+            <input type="checkbox" id="p2p-use-drawn" />
+            <span class="toggle-label">Use drawn zones instead of Excel file</span>
+          </label>
+        </div>
+
+        <!-- Options card (Entry/Exit Type, N-Deep, etc.) -->
+        <div class="card">
+          <div class="card-label">OPTIONS</div>
+          <div class="option-grid">
+            <div class="option-group">
+              <label class="opt-label">Entry/Exit Type</label>
+              <select class="select-input" id="p2p-entry-type">
+                <option value="LM">LM (LocationMark)</option>
+                <option value="AP">AP (ActionPoint)</option>
+              </select>
+            </div>
+            <div class="option-group">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="p2p-ndeep" onchange="onNdeepToggle()" />
+                <span class="toggle-label">N-Deep Mode</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- N-Deep options -->
+          <div id="p2p-ndeep-opts" style="display:none" class="option-grid">
+            <div class="option-group">
+              <label class="opt-label">Drop Sequence</label>
+              <select class="select-input" id="p2p-drop-seq">
+                <option value="f2l">Front to Last (f2l)</option>
+                <option value="l2f">Last to Front (l2f)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Scope options — always visible -->
+          <div class="option-grid" style="margin-top:10px">
+            <div class="option-group">
+              <label class="opt-label">Zone Scope</label>
+              <select class="select-input" id="p2p-zone-scope">
+                <option value="BOTH">BOTH</option>
+                <option value="ENTRY">ENTRY</option>
+                <option value="EXIT">EXIT</option>
+              </select>
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Subzone Scope</label>
+              <select class="select-input" id="p2p-sub-scope">
+                <option value="BOTH">BOTH</option>
+                <option value="ENTRY">ENTRY</option>
+                <option value="EXIT">EXIT</option>
+              </select>
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Location Scope</label>
+              <select class="select-input" id="p2p-loc-scope">
+                <option value="BOTH">BOTH</option>
+                <option value="ENTRY">ENTRY</option>
+                <option value="EXIT">EXIT</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Standard sequence option -->
+          <div id="p2p-standard-opts" class="option-group" style="margin-top:10px">
+            <label class="toggle-wrap">
+              <input type="checkbox" id="p2p-create-seq" />
+              <span class="toggle-label">Create Sequences for Subzones</span>
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button class="btn-accent" id="p2p-gen-btn" onclick="generateP2P()">▶ Generate Zone Config</button>
+          </div>
+        </div>
+
+        <div class="card" id="p2p-result-card" style="display:none">
+          <div class="card-label">RESULT</div>
+          <div id="p2p-download-row" class="download-row" style="display:none">
+            <a class="btn-success" id="p2p-download-link" href="#" download>⬇ Download JSON</a>
+          </div>
+          <div class="log-box" id="p2p-log"></div>
+        </div>
+      </section>
+
+      <!-- ── TAB 4: Map Validator ──────────────────────────── -->
+      <section class="tab-page" id="tab-map-validator">
+        <div class="page-header">
+          <h1 class="page-title">Map Validator</h1>
+          <p class="page-sub">Check entry/exit paths and full reachability between all points</p>
+        </div>
+
+        <div class="card">
+          <div class="card-label">MAP FILE</div>
+          <div class="file-row">
+            <div class="file-input-wrap" style="flex:1">
+              <input type="file" id="mv-file" accept=".json,.smap" class="file-input" />
+              <label for="mv-file" class="file-btn">Browse</label>
+              <span class="file-name" id="mv-filename">No file selected</span>
+            </div>
+            <button class="btn-accent" id="mv-run-btn" onclick="runMapValidator()">▶ Validate</button>
+          </div>
+        </div>
+
+        <!-- Summary badges -->
+        <div id="mv-summary" class="summary-bar" style="display:none">
+          <span class="badge badge-ok" id="mv-ok-badge">✓ 0 OK</span>
+          <span class="badge badge-warn" id="mv-warn-badge">⚠ 0 issues</span>
+          <span class="badge badge-info" id="mv-conn-badge">⬡ 0 gaps</span>
+          <span class="badge badge-neutral" id="mv-total-badge">◎ 0 total</span>
+        </div>
+
+        <!-- Issues table -->
+        <div class="card" id="mv-issues-card">
+          <div class="card-label">ISSUES FOUND</div>
+          <div class="table-wrap">
+            <table class="data-table" id="mv-issues-table">
+              <thead>
+                <tr>
+                  <th>Point Name</th>
+                  <th>Type</th>
+                  <th>Issue</th>
+                </tr>
+              </thead>
+              <tbody id="mv-issues-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Log -->
+        <div class="card">
+          <div class="card-label">
+            LOG
+            <span class="live-dot" id="mv-live-dot" style="display:none"></span>
+          </div>
+          <div class="log-box" id="mv-log"></div>
+        </div>
+      </section>
+
+      <!-- ── TAB 5: Orderfile Generator ────────────────── -->
+      <section class="tab-page" id="tab-orderfile">
+        <div class="page-header">
+          <h1 class="page-title">Orderfile Generator</h1>
+          <p class="page-sub">Generate optimized order subsets from raw order data</p>
+        </div>
+
+        <!-- Upload -->
+        <div class="card">
+          <div class="card-label">UPLOAD RAW DATA</div>
+          <p style="font-size:12px;color:var(--text-lo);margin-bottom:10px">
+            Excel (.xlsx) with columns: <code style="font-family:var(--ff-mono);color:var(--accent-alt)">order</code>,
+            <code style="font-family:var(--ff-mono);color:var(--accent-alt)">line</code>,
+            <code style="font-family:var(--ff-mono);color:var(--accent-alt)">unit</code>
+          </p>
+          <div class="file-row">
+            <label class="file-label">Raw Order Data</label>
+            <div class="file-input-wrap">
+              <input type="file" id="of-file" accept=".xlsx" class="file-input" />
+              <label for="of-file" class="file-btn">Browse</label>
+              <span class="file-name" id="of-filename">No file selected</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Data summary (auto-shown after upload) -->
+        <div class="card" id="of-summary-card" style="display:none">
+          <div class="card-label">DATA SUMMARY</div>
+          <div class="summary-bar">
+            <span class="badge badge-neutral">Orders &nbsp;<strong id="of-raw-orders">0</strong></span>
+            <span class="badge badge-neutral">Lines &nbsp;<strong id="of-raw-lines">0</strong></span>
+            <span class="badge badge-neutral">Units &nbsp;<strong id="of-raw-units">0</strong></span>
+          </div>
+        </div>
+
+        <!-- Targets -->
+        <div class="card" id="of-targets-card" style="display:none">
+          <div class="card-label">TARGETS</div>
+          <div class="option-grid">
+            <div class="option-group">
+              <label class="opt-label">Total Orders</label>
+              <input type="number" class="num-input" id="of-target-orders" min="1" value="100" />
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Sum of Lines</label>
+              <input type="number" class="num-input" id="of-target-lines" min="1" value="500" />
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Sum of Units</label>
+              <input type="number" class="num-input" id="of-target-units" min="1" value="5000" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Limitations + Generate -->
+        <div class="card" id="of-limits-card" style="display:none">
+          <div class="card-label">LIMITATIONS</div>
+          <div class="option-group" style="margin-bottom:12px">
+            <label class="toggle-wrap">
+              <input type="checkbox" id="of-use-limits" onchange="ofToggleLimits()" />
+              <span class="toggle-label">Apply quantity limitations</span>
+            </label>
+          </div>
+          <div id="of-limits-fields" style="display:none">
+            <div class="option-grid">
+              <div class="option-group">
+                <label class="opt-label">Max qty per order</label>
+                <input type="number" class="num-input" id="of-max-order" min="1" value="1000" />
+              </div>
+              <div class="option-group">
+                <label class="opt-label">Min qty per order</label>
+                <input type="number" class="num-input" id="of-min-order" min="1" value="1" />
+              </div>
+              <div class="option-group">
+                <label class="opt-label">Max qty per line</label>
+                <input type="number" class="num-input" id="of-max-line" min="1" value="100" />
+              </div>
+            </div>
+          </div>
+          <div class="action-row" style="margin-top:14px">
+            <button class="btn-accent" id="of-gen-btn" onclick="generateOrderfile()">▶ Generate Orderfile</button>
+          </div>
+        </div>
+
+        <!-- Progress -->
+        <div class="card" id="of-progress-card" style="display:none">
+          <div class="card-label">
+            OPTIMIZATION PROGRESS
+            <span class="live-dot" id="of-live-dot" style="display:none;margin-left:6px"></span>
+          </div>
+          <div style="margin-bottom:10px">
+            <div class="of-progress-outer">
+              <div class="of-progress-inner" id="of-progress-bar" style="width:0%"></div>
+            </div>
+            <span class="of-progress-text" id="of-progress-text">Starting…</span>
+          </div>
+          <div class="log-box" id="of-log"></div>
+        </div>
+
+        <!-- Result -->
+        <div class="card" id="of-result-card" style="display:none">
+          <div class="card-label">RESULT</div>
+          <div class="summary-bar" style="margin-bottom:14px">
+            <span class="badge badge-ok"      id="of-r-orders">Orders: —</span>
+            <span class="badge badge-ok"      id="of-r-lines">Lines: —</span>
+            <span class="badge badge-ok"      id="of-r-units">Units: —</span>
+            <span class="badge badge-neutral" id="of-r-upl">Units/Line: —</span>
+            <span class="badge badge-neutral" id="of-r-upo">Units/Order: —</span>
+            <span class="badge badge-neutral" id="of-r-lpo">Lines/Order: —</span>
+          </div>
+          <div id="of-download-row" class="download-row" style="display:none">
+            <a class="btn-success" id="of-download-link" href="#" download>⬇ Download Orderfile (.xlsx)</a>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── TAB 6: Robot Map Sync ────────────────────────── -->
+      <section class="tab-page" id="tab-map-sync">
+        <div class="page-header">
+          <h1 class="page-title">Robot Map Sync</h1>
+          <p class="page-sub">Copy a map file into multiple robot folders in bulk</p>
+        </div>
+
+        <!-- Source file -->
+        <div class="card">
+          <div class="card-label">SOURCE FILE</div>
+          <div class="file-row">
+            <label class="file-label">File to copy</label>
+            <div class="file-input-wrap">
+              <input type="file" id="ms-file" class="file-input" />
+              <label for="ms-file" class="file-btn">Browse</label>
+              <span class="file-name" id="ms-filename">No file selected</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Configuration -->
+        <div class="card">
+          <div class="card-label">ROBOT FOLDERS</div>
+          <div class="option-row">
+            <div class="option-group" style="flex:2">
+              <label class="opt-label">Parent directory</label>
+              <input type="text" class="text-input" id="ms-base-dir"
+                     placeholder="e.g. C:\…\robots\All\&lt;UUID&gt;\DispatchEditor\scene\robots"
+                     oninput="msUpdatePreview()" />
+            </div>
+          </div>
+          <div class="option-row">
+            <div class="option-group">
+              <label class="opt-label">Folder prefix</label>
+              <input type="text" class="text-input" id="ms-prefix"
+                     placeholder="e.g. sim_00" oninput="msUpdatePreview()" />
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Sub-folder <span style="font-weight:400;opacity:.6">(optional)</span></label>
+              <input type="text" class="text-input" id="ms-subfolder"
+                     placeholder="e.g. maps" oninput="msUpdatePreview()" />
+            </div>
+          </div>
+          <div class="option-row">
+            <div class="option-group">
+              <label class="opt-label">Starting number</label>
+              <input type="number" class="text-input" id="ms-start"
+                     value="1" min="1" oninput="msUpdatePreview()" />
+            </div>
+            <div class="option-group">
+              <label class="opt-label">Number of robots</label>
+              <input type="number" class="text-input" id="ms-count"
+                     value="10" min="1" oninput="msUpdatePreview()" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview -->
+        <div class="card" id="ms-preview-card" style="display:none">
+          <div class="card-label">PREVIEW</div>
+          <div class="stat-grid">
+            <div class="stat-box">
+              <div class="stat-val" id="ms-p-count">—</div>
+              <div class="stat-key">Folders</div>
+            </div>
+            <div class="stat-box" style="flex:3">
+              <div class="stat-val" style="font-size:11px;word-break:break-all;font-family:var(--ff-mono)" id="ms-p-first">—</div>
+              <div class="stat-key">First path</div>
+            </div>
+            <div class="stat-box" style="flex:3">
+              <div class="stat-val" style="font-size:11px;word-break:break-all;font-family:var(--ff-mono)" id="ms-p-last">—</div>
+              <div class="stat-key">Last path</div>
+            </div>
+          </div>
+          <div style="margin-top:14px;text-align:right">
+            <button class="btn-accent" id="ms-run-btn" onclick="msExecute()">▶ Copy to Robots</button>
+          </div>
+        </div>
+
+        <!-- Progress -->
+        <div class="card" id="ms-progress-card" style="display:none">
+          <div class="card-label">PROGRESS <span class="live-dot" id="ms-live-dot" style="display:none"></span></div>
+          <div class="of-progress-outer">
+            <div class="of-progress-inner" id="ms-progress-bar" style="width:0%"></div>
+          </div>
+          <div class="of-progress-text" id="ms-progress-text">0%</div>
+          <div class="log-box" id="ms-log"></div>
+        </div>
+
+        <!-- Result -->
+        <div class="card" id="ms-result-card" style="display:none">
+          <div class="card-label">RESULT</div>
+          <div class="stat-grid" id="ms-result-grid"></div>
+        </div>
+
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Status bar -->
+  <footer class="status-bar">
+    <span class="status-text" id="status-text">Ready</span>
+    <span class="status-live">● Live</span>
+  </footer>
+
+</div>
+
+<!-- Zone form modal (used by Point to Point map "Draw Zone") -->
+<div class="picker-overlay" id="zone-form-overlay" style="display:none" onclick="zfClose(event)">
+  <div class="picker-modal" onclick="event.stopPropagation()" style="height:auto;min-height:300px">
+    <div class="picker-header">
+      <span class="picker-title" id="zf-title">Add Zone</span>
+      <button class="picker-close" type="button" onclick="zfClose()">✕</button>
+    </div>
+    <div class="picker-body" style="padding:14px 18px">
+      <div class="option-group" style="margin-bottom:10px">
+        <label class="opt-label">Zone Name</label>
+        <input type="text" class="text-input" id="zf-name" placeholder="e.g. Zone_A" />
+      </div>
+      <div class="option-group" style="margin-bottom:10px">
+        <label class="opt-label">Zone Entry LM</label>
+        <select class="select-input" id="zf-entry"></select>
+      </div>
+      <div class="option-group" style="margin-bottom:10px">
+        <label class="opt-label">Zone Exit LM</label>
+        <select class="select-input" id="zf-exit"></select>
+      </div>
+      <div class="option-group" style="font-family:var(--ff-mono);font-size:11px;color:var(--text-lo)">
+        <span id="zf-bbox-display"></span>
+      </div>
+    </div>
+    <div class="picker-footer">
+      <span class="picker-hint">LM dropdowns are sorted by distance to the box centre</span>
+      <div>
+        <button class="btn-ghost" type="button" onclick="zfClose()">Cancel</button>
+        <button class="btn-accent" type="button" onclick="zfConfirm()" style="margin-left:6px">Add Zone</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Server-side file picker modal -->
+<div class="picker-overlay" id="picker-overlay" style="display:none" onclick="closeServerPicker(event)">
+  <div class="picker-modal" onclick="event.stopPropagation()">
+    <div class="picker-header">
+      <span class="picker-title">Pick a file from disk</span>
+      <button class="picker-close" type="button" onclick="closeServerPicker()">✕</button>
+    </div>
+    <div class="picker-toolbar">
+      <button class="btn-ghost picker-up" type="button" onclick="pickerGoUp()" title="Up one level">⬆ Up</button>
+      <input type="text" class="text-input picker-path" id="picker-path-input"
+             placeholder="Type a path and press Enter…"
+             onkeydown="if(event.key==='Enter'){pickerNavigate(this.value)}" />
+    </div>
+    <div class="picker-body">
+      <ul class="picker-list" id="picker-list"></ul>
+    </div>
+    <div class="picker-footer">
+      <span class="picker-hint" id="picker-hint">Click a folder to open it · click a file to select</span>
+      <button class="btn-ghost" type="button" onclick="closeServerPicker()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
