@@ -719,6 +719,7 @@ def map_validator_validate():
         return jsonify({"error": "No file uploaded"}), 400
 
     f = request.files["file"]
+    detailed_review = request.form.get("detailed_review") in ("1", "true", "True", "on")
     stream_id = uuid.uuid4().hex
     path = _save_upload(f, "mapval")
 
@@ -746,7 +747,24 @@ def map_validator_validate():
 
             _push_event(stream_id, {"type": "log", "level": "info",
                                      "msg": "Running validation…"})
-            result = wl.run_map_validation(data)
+            result = wl.run_map_validation(data, detailed_review=detailed_review)
+
+            if detailed_review:
+                n_removed = result.get("n_removed", 0)
+                if n_removed:
+                    names = [p["name"] for p in result["removed_points"]]
+                    preview = ", ".join(names[:10])
+                    if n_removed > 10:
+                        preview += f", +{n_removed - 10} more"
+                    _push_event(stream_id, {
+                        "type": "log", "level": "info",
+                        "msg": f"Detailed Map Review: removed {n_removed} bidirectional-only "
+                               f"point(s): {preview}"
+                    })
+                else:
+                    _push_event(stream_id, {"type": "log", "level": "info",
+                                             "msg": "Detailed Map Review: no bidirectional-only "
+                                                    "points to remove."})
 
             total = result["total"]
             n_issues = result["n_issues"]

@@ -1122,10 +1122,50 @@ def check_connectivity(all_points, outgoing):
     return rows, n_s
 
 
-def run_map_validation(json_data):
+def prune_bidirectional_points(all_points, outgoing, incoming):
+    """
+    Removes points whose every edge is bidirectional (each neighbor has both
+    an outgoing and incoming edge to/from the point — i.e. no one-way edge
+    touches it at all). Points with no edges are left alone (they're already
+    caught by the entry/exit check).
+
+    Removing such a point can turn a former neighbor into an all-bidirectional
+    point too (a chain of reversible-only points), so this repeats in rounds
+    until nothing more qualifies.
+
+    Returns (pruned_points, pruned_outgoing, pruned_incoming, removed) where
+    removed is a sorted list of (name, type) tuples for every point taken out.
+    """
+    pts = dict(all_points)
+    out = {k: set(v) for k, v in outgoing.items()}
+    inc = {k: set(v) for k, v in incoming.items()}
+    removed = []
+
+    while True:
+        candidates = [name for name in pts if out.get(name) and out.get(name) == inc.get(name)]
+        if not candidates:
+            break
+        for name in candidates:
+            removed.append((name, pts[name]))
+            for n in out.get(name, set()) | inc.get(name, set()):
+                out.get(n, set()).discard(name)
+                inc.get(n, set()).discard(name)
+            out.pop(name, None)
+            inc.pop(name, None)
+            pts.pop(name, None)
+
+    return pts, out, inc, sorted(removed)
+
+
+def run_map_validation(json_data, detailed_review=False):
     """
     Full map validation. Returns dict with issues, connectivity rows, counts.
     This is CPU-bound — the caller should run it in a thread.
+
+    When detailed_review is True, points that are only ever connected by
+    bidirectional edges are pruned out first (see prune_bidirectional_points)
+    and the checks below run on that reduced graph. When False (default),
+    the checks run on the map exactly as uploaded.
     """
     points = json_data.get("advancedPointList", [])
     curves = json_data.get("advancedCurveList", [])
@@ -1146,10 +1186,17 @@ def run_map_validation(json_data):
         if name:
             all_points[name] = "AP" if cls == "ActionPoint" else "LM"
 
+    if detailed_review:
+        pruned_points, pruned_out, pruned_in, removed = prune_bidirectional_points(
+            all_points, outgoing, incoming
+        )
+    else:
+        pruned_points, pruned_out, pruned_in, removed = all_points, outgoing, incoming, []
+
     issues = []
-    for name, pt_type in sorted(all_points.items()):
-        has_in = bool(incoming.get(name))
-        has_out = bool(outgoing.get(name))
+    for name, pt_type in sorted(pruned_points.items()):
+        has_in = bool(pruned_in.get(name))
+        has_out = bool(pruned_out.get(name))
         if not has_in and not has_out:
             issues.append((name, pt_type, "No entry path  &  No exit path"))
         elif not has_in:
@@ -1157,10 +1204,10 @@ def run_map_validation(json_data):
         elif not has_out:
             issues.append((name, pt_type, "No exit path"))
 
-    conn_rows, n_sccs = check_connectivity(all_points, outgoing)
+    conn_rows, n_sccs = check_connectivity(pruned_points, pruned_out)
 
     return {
-        "all_points": all_points,
+        "all_points": pruned_points,
         "issues": issues,
         "conn_rows": [
             {
@@ -1170,9 +1217,13 @@ def run_map_validation(json_data):
             for r in conn_rows
         ],
         "n_sccs": n_sccs,
-        "total": len(all_points),
+        "total": len(pruned_points),
         "n_issues": len(issues),
         "n_conn": len(conn_rows),
+        "removed_points": [{"name": n, "type": t} for n, t in removed],
+        "n_removed": len(removed),
+        "total_before": len(all_points),
+        "detailed_review": detailed_review,
     }
 
 

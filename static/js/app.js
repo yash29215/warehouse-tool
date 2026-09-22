@@ -1311,6 +1311,7 @@ async function runMapValidator() {
 
   const fd = new FormData();
   fd.append('file', fileEl.files[0]);
+  fd.append('detailed_review', document.getElementById('mv-detailed-review').checked ? '1' : '0');
 
   let streamId;
   try {
@@ -1409,6 +1410,14 @@ function renderValidatorResult(data) {
   document.getElementById('mv-warn-badge').textContent = `⚠ ${nIssues} path issue(s)`;
   document.getElementById('mv-conn-badge').textContent = `⬡ ${nConn} conn gap(s)`;
   document.getElementById('mv-total-badge').textContent = `◎ ${total} total`;
+  const removedBadge = document.getElementById('mv-removed-badge');
+  if (data.detailed_review) {
+    const nRemoved = data.n_removed || 0;
+    removedBadge.textContent = `✂ ${nRemoved} removed (bidirectional)`;
+    removedBadge.style.display = '';
+  } else {
+    removedBadge.style.display = 'none';
+  }
   showCard('mv-summary');
 }
 
