@@ -465,6 +465,12 @@
             </div>
             <button class="btn-accent" id="mv-run-btn" onclick="runMapValidator()">▶ Validate</button>
           </div>
+          <div class="option-row">
+            <label class="toggle-wrap">
+              <input type="checkbox" id="mv-detailed-review" />
+              <span class="toggle-label">Detailed Map Review</span>
+            </label>
+          </div>
         </div>
 
         <!-- Summary badges -->
@@ -473,6 +479,7 @@
           <span class="badge badge-warn" id="mv-warn-badge">⚠ 0 issues</span>
           <span class="badge badge-info" id="mv-conn-badge">⬡ 0 gaps</span>
           <span class="badge badge-neutral" id="mv-total-badge">◎ 0 total</span>
+          <span class="badge badge-neutral" id="mv-removed-badge">✂ 0 removed (bidirectional)</span>
         </div>
 
         <!-- Issues table -->
