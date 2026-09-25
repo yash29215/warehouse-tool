@@ -55,6 +55,10 @@
           <span class="nav-icon">⟳</span>
           <span class="nav-label">Map Sync</span>
         </button>
+        <button class="nav-item" data-tab="dwg-map" onclick="showTab('dwg-map')">
+          <span class="nav-icon">✎</span>
+          <span class="nav-label">DWG → Map</span>
+        </button>
       </nav>
       <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Toggle sidebar">
         <span id="toggleIcon">‹</span>
@@ -645,6 +649,16 @@
           </div>
         </div>
 
+        <!-- Platform toggle -->
+        <div class="card">
+          <div class="option-row">
+            <label class="toggle-wrap">
+              <input type="checkbox" id="ms-is-mac" onchange="msOnMacToggle()" />
+              <span class="toggle-label">I'm using a Mac (RoboShop doesn't run on Mac — route this through a remote agent on the Linux VM instead)</span>
+            </label>
+          </div>
+        </div>
+
         <!-- Configuration -->
         <div class="card">
           <div class="card-label">ROBOT FOLDERS</div>
@@ -678,6 +692,54 @@
               <label class="opt-label">Number of robots</label>
               <input type="number" class="text-input" id="ms-count"
                      value="10" min="1" oninput="msUpdatePreview()" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Remote VM access via SSH (shown when "I'm using a Mac" above is checked) -->
+        <div class="card" id="ms-mac-fields" style="display:none">
+          <div class="card-label">ROBOSHOP VM (SSH) <span style="font-weight:400;opacity:.6">(required on Mac — no local access to robot folders)</span></div>
+          <div class="option-row">
+            <div class="option-group" style="flex:2">
+              <label class="opt-label">VM host</label>
+              <input type="text" class="text-input" id="ms-ssh-host"
+                     placeholder="e.g. 172.29.4.8" />
+            </div>
+            <div class="option-group">
+              <label class="opt-label">SSH port</label>
+              <input type="number" class="text-input" id="ms-ssh-port"
+                     value="22" min="1" />
+            </div>
+          </div>
+          <div class="option-row">
+            <div class="option-group" style="flex:2">
+              <label class="opt-label">SSH username</label>
+              <input type="text" class="text-input" id="ms-ssh-username"
+                     placeholder="e.g. root" />
+            </div>
+          </div>
+          <div class="option-row">
+            <div class="option-group" style="flex:2">
+              <label class="opt-label">Private key path <span style="font-weight:400;opacity:.6">(on this server, not the VM)</span></label>
+              <input type="text" class="text-input" id="ms-ssh-key-path"
+                     placeholder="e.g. ~/.ssh/roboshop_vm_key" />
+            </div>
+            <div class="option-group" style="flex:2">
+              <label class="opt-label">Key passphrase <span style="font-weight:400;opacity:.6">(optional)</span></label>
+              <input type="password" class="text-input" id="ms-ssh-key-passphrase" />
+            </div>
+          </div>
+          <div class="option-row">
+            <button class="btn-ghost" id="ms-discover-btn" onclick="msDiscoverVmProjects()">🔍 Discover Robots on VM</button>
+            <span class="file-name" id="ms-discover-status"></span>
+          </div>
+          <div class="option-row" id="ms-vm-project-row" style="display:none">
+            <div class="option-group" style="flex:3">
+              <label class="opt-label">RoboShop system found on VM</label>
+              <select class="text-input" id="ms-vm-project-select"></select>
+            </div>
+            <div class="option-group" style="align-self:flex-end">
+              <button class="btn-accent" onclick="msUseVmProject()">Use this path</button>
             </div>
           </div>
         </div>
@@ -718,6 +780,45 @@
         <div class="card" id="ms-result-card" style="display:none">
           <div class="card-label">RESULT</div>
           <div class="stat-grid" id="ms-result-grid"></div>
+        </div>
+
+      </section>
+
+      <!-- ── TAB 7: DWG → Map ─────────────────────────────── -->
+      <section class="tab-page" id="tab-dwg-map">
+        <div class="page-header">
+          <h1 class="page-title">DWG → Map</h1>
+          <p class="page-sub">Step 1: read a .dwg (or .dxf) file and list the block definitions it contains</p>
+        </div>
+
+        <div class="card">
+          <div class="card-label">DRAWING FILE</div>
+          <div class="file-row">
+            <label class="file-label">.dwg / .dxf file</label>
+            <div class="file-input-wrap">
+              <input type="file" id="dm-file" accept=".dwg,.dxf" class="file-input" />
+              <label for="dm-file" class="file-btn">Browse</label>
+              <span class="file-name" id="dm-filename">No file selected</span>
+            </div>
+          </div>
+          <div style="margin-top:14px;text-align:right">
+            <button class="btn-accent" id="dm-run-btn" onclick="dmListBlocks()">▶ List Block IDs</button>
+          </div>
+        </div>
+
+        <div class="card" id="dm-status-card" style="display:none">
+          <div class="card-label">STATUS <span class="live-dot" id="dm-live-dot" style="display:none"></span></div>
+          <div class="log-box" id="dm-log"></div>
+        </div>
+
+        <div class="card" id="dm-result-card" style="display:none">
+          <div class="card-label">BLOCK DEFINITIONS FOUND <span id="dm-count-badge" style="font-weight:400;opacity:.6"></span></div>
+          <div class="table-wrap">
+            <table class="data-table" id="dm-blocks-table">
+              <thead><tr><th>#</th><th>Block name</th><th>Preview</th></tr></thead>
+              <tbody id="dm-blocks-tbody"></tbody>
+            </table>
+          </div>
         </div>
 
       </section>
@@ -787,6 +888,16 @@
       <span class="picker-hint" id="picker-hint">Click a folder to open it · click a file to select</span>
       <button class="btn-ghost" type="button" onclick="closeServerPicker()">Cancel</button>
     </div>
+  </div>
+</div>
+
+<div class="dm-preview-overlay" id="dm-preview-overlay" style="display:none" onclick="dmClosePreview(event)">
+  <div class="dm-preview-modal" onclick="event.stopPropagation()">
+    <div class="dm-preview-modal-header">
+      <span id="dm-preview-title">Block preview</span>
+      <button class="picker-close" type="button" onclick="dmClosePreview()">✕</button>
+    </div>
+    <div class="dm-preview-modal-body" id="dm-preview-body"></div>
   </div>
 </div>
 

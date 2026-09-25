@@ -2,7 +2,15 @@ version: "3.9"
 
 services:
   warehouse-tools:
-    build: .
+    build:
+      context: .
+      args:
+        # Set to "true" (and place the .deb at vendor/ODAFileConverter.deb)
+        # to enable the "DWG → Map" tab's .dwg → .dxf conversion step.
+        INSTALL_ODA: "true"
+    # ODA File Converter only ships amd64 (x86_64) Linux builds — force that
+    # platform even on Apple Silicon (arm64) hosts, via emulation.
+    platform: linux/amd64
     container_name: warehouse-tools
     ports:
       - "5000:5000"        # change left side to use a different host port
