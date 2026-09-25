@@ -5,12 +5,18 @@ Serves the single-page app and all API endpoints.
 
 import json
 import os
+import platform
+import posixpath
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from collections import defaultdict
 
 import pandas as pd
+import paramiko
 from flask import (Flask, Response, jsonify, request,
                    send_file, send_from_directory)
 
@@ -23,6 +29,13 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# True when this Flask process itself is running on a Mac. Map Sync uses this
+# to decide whether it can copy files on its own local disk (Windows/Linux —
+# presumably co-located with the robot folders) or must SSH into the remote
+# Linux VM instead (Mac — no local access to those paths, and RoboShop
+# doesn't run on Mac at all).
+IS_MAC_SERVER = platform.system() == "Darwin"
 
 # In-memory store for SSE progress streams
 _sse_streams: dict[str, list] = {}
@@ -81,6 +94,100 @@ def _detect_binary_smap(path: str):
     return None
 
 
+def _ssh_connect(host: str, port: int, username: str,
+                  key_path: str = "", key_passphrase: str = "",
+                  password: str = "") -> paramiko.SSHClient:
+    """Opens an SSH connection to the RoboShop VM. Uses AutoAddPolicy — these
+    are internal automation VMs the user names explicitly, not arbitrary
+    hosts, so we skip strict host-key verification for convenience.
+
+    Prefers a private key (key_path) when given — many VMs (root login in
+    particular) only accept publickey auth and never even offer password
+    auth. Falls back to password only when no key path is supplied.
+    """
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if key_path:
+        client.connect(host, port=port, username=username,
+                        key_filename=os.path.expanduser(key_path),
+                        passphrase=key_passphrase or None, timeout=15)
+    else:
+        client.connect(host, port=port, username=username, password=password, timeout=15)
+    return client
+
+
+def _ssh_exec(client: paramiko.SSHClient, command: str) -> tuple[int, str, str]:
+    """Runs one command over an open SSH connection, blocking until it exits.
+    Returns (exit_code, stdout, stderr)."""
+    _, stdout, stderr = client.exec_command(command)
+    exit_code = stdout.channel.recv_exit_status()
+    return exit_code, stdout.read().decode("utf-8", "replace"), stderr.read().decode("utf-8", "replace")
+
+
+# Standalone discovery script — mirrors discover_projects()/discover_projects_impl()
+# from bind_parking_and_push_map.py / roboshop_agent.py, run on-demand over SSH
+# (via `python3 -`) instead of needing a persistent agent process on the VM.
+_DISCOVER_PROJECTS_SCRIPT = r"""
+import os, json, re
+
+def find_ip(data):
+    ip_pattern = re.compile(r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}")
+    if isinstance(data, dict):
+        for v in data.values():
+            r = find_ip(v)
+            if r: return r
+    elif isinstance(data, list):
+        for v in data:
+            r = find_ip(v)
+            if r: return r
+    elif isinstance(data, str):
+        m = ip_pattern.search(data)
+        if m: return m.group()
+    return None
+
+def get_robots_root():
+    override = os.environ.get("ROBOSHOP_ROBOTS_ROOT")
+    if override and os.path.isdir(override):
+        return override
+    home = os.path.expanduser("~")
+    for c in [
+        os.path.join(home, ".local", "share", "RoboshopPro", "appInfo", "robots"),
+        os.path.join(home, ".config", "RoboshopPro", "appInfo", "robots"),
+        os.path.join(home, "RoboshopPro", "appInfo", "robots"),
+        "/opt/RoboshopPro/appInfo/robots",
+    ]:
+        if os.path.isdir(c):
+            return c
+    return None
+
+robots_root = get_robots_root()
+projects = []
+if robots_root and os.path.exists(robots_root):
+    for category in os.listdir(robots_root):
+        category_path = os.path.join(robots_root, category)
+        if not os.path.isdir(category_path):
+            continue
+        for project_id in os.listdir(category_path):
+            project_path = os.path.join(category_path, project_id)
+            if not os.path.isdir(project_path):
+                continue
+            ip = "Unknown IP"
+            robot_info = os.path.join(project_path, "robot_info.json")
+            if os.path.exists(robot_info):
+                try:
+                    with open(robot_info, encoding="utf-8") as f:
+                        ip_found = find_ip(json.load(f))
+                        if ip_found:
+                            ip = ip_found
+                except Exception:
+                    pass
+            projects.append({"display": f"{category} ({ip})", "path": project_path, "ip": ip})
+
+projects.sort(key=lambda p: (p["ip"] == "Unknown IP", p["display"].lower()))
+print(json.dumps({"count": len(projects), "projects": projects}))
+"""
+
+
 # ─────────────────────────────────────────────
 # Static / index
 # ─────────────────────────────────────────────
@@ -93,6 +200,13 @@ def index():
 @app.route("/static/<path:path>")
 def static_files(path):
     return send_from_directory("static", path)
+
+
+@app.route("/api/platform")
+def platform_info():
+    """Lets the frontend know whether this server is running on a Mac, so
+    Map Sync can show/require the remote-agent fields (see IS_MAC_SERVER)."""
+    return jsonify({"is_mac": IS_MAC_SERVER})
 
 
 # ─────────────────────────────────────────────
@@ -1006,31 +1120,95 @@ def orderfile_stream(stream_id):
 # Tab 6 — Robot Map Sync
 # ─────────────────────────────────────────────
 
+@app.route("/api/map-sync/vm-projects", methods=["POST"])
+def map_sync_vm_projects():
+    """SSHes into the RoboShop VM and runs a one-off discovery script (no
+    persistent agent process needed) so the browser gets a pickable list of
+    RoboShop systems (name + IP + path) instead of the user typing a raw
+    path blind."""
+    data = request.get_json(silent=True) or {}
+    host           = (data.get("ssh_host") or "").strip()
+    username       = (data.get("ssh_username") or "").strip()
+    key_path       = (data.get("ssh_key_path") or "").strip()
+    key_passphrase = data.get("ssh_key_passphrase") or ""
+    password       = data.get("ssh_password") or ""
+    try:
+        port = int(data.get("ssh_port") or 22)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid SSH port"}), 400
+
+    if not host:
+        return jsonify({"error": "VM host is required"}), 400
+    if not username:
+        return jsonify({"error": "SSH username is required"}), 400
+
+    try:
+        client = _ssh_connect(host, port, username, key_path, key_passphrase, password)
+    except Exception as e:
+        return jsonify({"error": f"Could not connect over SSH: {e}"}), 502
+
+    try:
+        stdin, stdout, stderr = client.exec_command("python3 -")
+        stdin.write(_DISCOVER_PROJECTS_SCRIPT)
+        stdin.channel.shutdown_write()
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode("utf-8", "replace")
+        err = stderr.read().decode("utf-8", "replace")
+        if exit_code != 0:
+            return jsonify({"error": f"Discovery script failed: {err or out}"}), 502
+        payload = json.loads(out)
+    except Exception as e:
+        return jsonify({"error": f"Discovery failed: {e}"}), 502
+    finally:
+        client.close()
+
+    return jsonify(payload)
+
+
 @app.route("/api/map-sync/execute", methods=["POST"])
 def map_sync_execute():
-    import shutil
+    import shlex
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
     f = request.files["file"]
-    base_dir   = request.form.get("base_dir",   "").strip()
-    prefix     = request.form.get("prefix",     "").strip()
-    sub_folder = request.form.get("sub_folder", "").strip()
+    base_dir     = request.form.get("base_dir",   "").strip()
+    prefix       = request.form.get("prefix",     "").strip()
+    sub_folder   = request.form.get("sub_folder", "").strip()
+    ssh_host       = request.form.get("ssh_host",     "").strip()
+    ssh_username   = request.form.get("ssh_username", "").strip()
+    ssh_key_path   = request.form.get("ssh_key_path", "").strip()
+    ssh_key_pass   = request.form.get("ssh_key_passphrase", "")
+    ssh_password   = request.form.get("ssh_password", "")
+    # Explicit client-side choice ("I'm using a Mac" checkbox) rather than
+    # IS_MAC_SERVER (the Flask process's own OS) — the two can disagree, e.g.
+    # when warehouse-tool runs inside a Linux Docker container on a Mac host.
+    use_remote_agent = request.form.get("use_remote_agent") in ("1", "true", "True", "on")
 
     try:
         start = int(request.form.get("start", 1))
         count = int(request.form.get("count", 0))
+        ssh_port = int(request.form.get("ssh_port") or 22)
     except ValueError as e:
-        return jsonify({"error": f"Invalid start/count: {e}"}), 400
+        return jsonify({"error": f"Invalid start/count/port: {e}"}), 400
 
     if not base_dir:
         return jsonify({"error": "Parent directory is required"}), 400
-    if not os.path.isdir(base_dir):
-        return jsonify({"error": f"Directory not found: {base_dir}"}), 400
     if not prefix:
         return jsonify({"error": "Folder prefix is required"}), 400
     if count <= 0:
         return jsonify({"error": "Number of robots must be > 0"}), 400
+
+    if use_remote_agent:
+        # No local filesystem access to the robot folders from here — the
+        # path only makes sense on the VM, so skip the local os.path.isdir
+        # check and require SSH credentials for that VM instead.
+        if not ssh_host:
+            return jsonify({"error": "VM host is required"}), 400
+        if not ssh_username:
+            return jsonify({"error": "SSH username is required"}), 400
+    elif not os.path.isdir(base_dir):
+        return jsonify({"error": f"Directory not found: {base_dir}"}), 400
 
     src_path = _save_upload(f, "mapsync")
     filename = f.filename or os.path.basename(src_path)
@@ -1042,6 +1220,55 @@ def map_sync_execute():
     def _worker():
         success = failed = 0
         try:
+            if use_remote_agent:
+                _push_event(stream_id, {"type": "log", "level": "info",
+                                         "msg": f"Connecting to {ssh_host} over SSH…"})
+                try:
+                    client = _ssh_connect(ssh_host, ssh_port, ssh_username,
+                                           ssh_key_path, ssh_key_pass, ssh_password)
+                    sftp = client.open_sftp()
+                except Exception as e:
+                    _push_event(stream_id, {"type": "log", "level": "err",
+                                             "msg": f"SSH connection failed: {e}"})
+                    _push_event(stream_id, {"type": "result", "success": 0,
+                                             "failed": count, "total": count})
+                    return
+
+                try:
+                    for i in range(count):
+                        robot_id    = f"{prefix}{start + i}"
+                        folder_path = posixpath.join(base_dir, robot_id, sub_folder) if sub_folder \
+                                      else posixpath.join(base_dir, robot_id)
+                        dest = posixpath.join(folder_path, filename)
+                        try:
+                            exit_code, _, err = _ssh_exec(client, f"mkdir -p {shlex.quote(folder_path)}")
+                            if exit_code != 0:
+                                raise RuntimeError(err.strip() or f"mkdir exited {exit_code}")
+                            sftp.put(src_path, dest)
+                            success += 1
+                            _push_event(stream_id, {
+                                "type": "progress",
+                                "pct": int((i + 1) / count * 100),
+                                "msg": f"[OK]   {folder_path}",
+                                "ok": True,
+                            })
+                        except Exception as e:
+                            failed += 1
+                            _push_event(stream_id, {
+                                "type": "progress",
+                                "pct": int((i + 1) / count * 100),
+                                "msg": f"[FAIL] {folder_path}  —  {e}",
+                                "ok": False,
+                            })
+                finally:
+                    sftp.close()
+                    client.close()
+
+                _push_event(stream_id, {
+                    "type": "result", "success": success, "failed": failed, "total": count,
+                })
+                return
+
             for i in range(count):
                 robot_id    = f"{prefix}{start + i}"
                 folder_path = os.path.join(base_dir, robot_id, sub_folder) if sub_folder \
@@ -1100,6 +1327,159 @@ def map_sync_stream(stream_id):
                         _sse_streams.pop(stream_id, None)
                     return
             time.sleep(0.1)
+        yield f"data: {json.dumps({'type': 'done', 'timeout': True})}\n\n"
+        with _sse_lock:
+            _sse_streams.pop(stream_id, None)
+
+    return Response(_generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ─────────────────────────────────────────────
+# Tab 7 — DWG → Map
+# ─────────────────────────────────────────────
+
+# No macOS build of ODA File Converter exists, so this only works when
+# warehouse-tool runs inside the project's Docker image built with
+# --build-arg INSTALL_ODA=true (see the Dockerfile for setup steps).
+ODA_FILE_CONVERTER = os.environ.get("ODA_FILE_CONVERTER_PATH", "/usr/bin/ODAFileConverter")
+
+
+def _convert_dwg_to_dxf(dwg_path: str) -> str:
+    """Converts a .dwg file to .dxf via the ODA File Converter CLI, run under
+    a virtual display (xvfb) since it's a Qt GUI app even in batch mode.
+    Returns the path to the resulting .dxf file, saved under UPLOAD_DIR.
+
+    On success the tool exits on its own once it's done (confirmed against
+    a real file — an empty input folder is the one case it never exits, but
+    that can't happen here since we always seed exactly one file).
+    On a bad/corrupt .dwg it still exits cleanly, but writes a
+    "<name>.dxf.err" file instead of "<name>.dxf" — read that back so the
+    caller gets ODA's actual reason instead of a generic failure message.
+    """
+    if not os.path.exists(ODA_FILE_CONVERTER):
+        raise RuntimeError(
+            f"ODA File Converter not found at {ODA_FILE_CONVERTER}. This step "
+            "only runs inside the Docker image built with --build-arg "
+            "INSTALL_ODA=true — see the Dockerfile for setup steps."
+        )
+
+    in_dir = tempfile.mkdtemp(prefix="dwg_in_")
+    out_dir = tempfile.mkdtemp(prefix="dwg_out_")
+    try:
+        dwg_name = os.path.basename(dwg_path)
+        shutil.copy2(dwg_path, os.path.join(in_dir, dwg_name))
+        dxf_name = os.path.splitext(dwg_name)[0] + ".dxf"
+
+        # ODAFileConverter <in_dir> <out_dir> <out_ver> <out_type> <recurse> <audit>
+        cmd = ["xvfb-run", "-a", ODA_FILE_CONVERTER,
+               in_dir, out_dir, "ACAD2018", "DXF", "0", "1"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(f"ODA File Converter failed: {result.stderr.strip() or result.stdout.strip()}")
+
+        converted_path = os.path.join(out_dir, dxf_name)
+        if not os.path.exists(converted_path):
+            err_path = os.path.join(out_dir, dxf_name + ".err")
+            if os.path.exists(err_path):
+                with open(err_path, encoding="utf-8", errors="replace") as fh:
+                    raise RuntimeError(f"ODA File Converter could not read this file: {fh.read().strip()}")
+            raise RuntimeError("ODA File Converter did not produce a .dxf output file")
+
+        final_path = os.path.join(UPLOAD_DIR, f"dwgconv_{uuid.uuid4().hex}.dxf")
+        shutil.move(converted_path, final_path)
+        return final_path
+    finally:
+        shutil.rmtree(in_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+@app.route("/api/dwg-map/list-blocks", methods=["POST"])
+def dwg_map_list_blocks():
+    """Step 1 of DWG -> SMAP: upload a .dwg (or .dxf directly) and get back
+    the distinct block definition names found in it. Runs in the background
+    and streams progress over SSE (see /api/dwg-map/stream) since DWG->DXF
+    conversion can take a few seconds."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f = request.files["file"]
+    ext = os.path.splitext(f.filename or "")[1].lower()
+    if ext not in (".dwg", ".dxf"):
+        return jsonify({"error": "Please upload a .dwg or .dxf file"}), 400
+
+    src_path = _save_upload(f, "dwgmap")
+    stream_id = uuid.uuid4().hex
+
+    with _sse_lock:
+        _sse_streams[stream_id] = []
+
+    def _worker():
+        dxf_path = src_path
+        converted = False
+        try:
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "File uploaded, starting…"})
+            if ext == ".dwg":
+                _push_event(stream_id, {"type": "log", "level": "info",
+                                         "msg": "Converting DWG → DXF via ODA File Converter "
+                                                "(this can take a few seconds)…"})
+                dxf_path = _convert_dwg_to_dxf(src_path)
+                converted = True
+                _push_event(stream_id, {"type": "log", "level": "ok",
+                                         "msg": "Conversion complete."})
+            else:
+                _push_event(stream_id, {"type": "log", "level": "info",
+                                         "msg": "Already DXF — skipping conversion."})
+
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "Scanning for block definitions…"})
+            blocks = wl.list_dwg_block_names(dxf_path)
+            _push_event(stream_id, {"type": "log", "level": "ok",
+                                     "msg": f"Found {len(blocks)} block definition(s)."})
+
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "Rendering block previews…"})
+            previews = wl.render_dwg_block_previews(dxf_path, blocks)
+            _push_event(stream_id, {"type": "log", "level": "ok", "msg": "Done."})
+
+            _push_event(stream_id, {"type": "result", "blocks": blocks, "count": len(blocks),
+                                     "previews": previews})
+        except Exception as e:
+            _push_event(stream_id, {"type": "log", "level": "err", "msg": str(e)})
+        finally:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+            if converted:
+                try:
+                    os.remove(dxf_path)
+                except OSError:
+                    pass
+            _close_stream(stream_id)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"stream_id": stream_id})
+
+
+@app.route("/api/dwg-map/stream/<stream_id>")
+def dwg_map_stream(stream_id):
+    """SSE endpoint — client subscribes after getting stream_id."""
+    def _generate():
+        sent = 0
+        deadline = time.time() + 300  # 5 min max
+        while time.time() < deadline:
+            with _sse_lock:
+                new_events = _sse_streams.get(stream_id, [])[sent:]
+            for ev in new_events:
+                sent += 1
+                yield f"data: {json.dumps(ev)}\n\n"
+                if ev.get("type") == "done":
+                    with _sse_lock:
+                        _sse_streams.pop(stream_id, None)
+                    return
+            time.sleep(0.15)
         yield f"data: {json.dumps({'type': 'done', 'timeout': True})}\n\n"
         with _sse_lock:
             _sse_streams.pop(stream_id, None)

@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireFileInput('mv-file', 'mv-filename');
   wireFileInput('of-file', 'of-filename', ofOnFileSelected);
   wireFileInput('ms-file', 'ms-filename', msUpdatePreview);
+  wireFileInput('dm-file', 'dm-filename');
 
   document.getElementById('cp-cross-aisle').addEventListener('change', function () {
     document.getElementById('cp-sensitivity-wrap').style.display =
@@ -70,7 +71,20 @@ document.addEventListener('DOMContentLoaded', () => {
     if (cpMap.points.length)  cpResizeCanvas();
     if (p2pMap.points.length) p2pResizeCanvas();
   });
+
+  fetch('/api/platform').then(r => r.json()).then(data => {
+    // Best-effort default only — e.g. wrong when the server runs inside a
+    // Linux Docker container on a Mac host. The checkbox is what actually
+    // decides the code path; this just pre-ticks it as a convenience guess.
+    document.getElementById('ms-is-mac').checked = !!data.is_mac;
+    msOnMacToggle();
+  }).catch(() => {});
 });
+
+function msOnMacToggle() {
+  const isMac = document.getElementById('ms-is-mac').checked;
+  document.getElementById('ms-mac-fields').style.display = isMac ? '' : 'none';
+}
 
 // ── Log helpers ───────────────────────────────
 
@@ -1755,6 +1769,69 @@ function renderOrderfileResult(msg) {
 // ── Robot Map Sync ────────────────────────────
 
 let msEventSource = null;
+let msVmProjects = [];
+
+async function msDiscoverVmProjects() {
+  const sshHost     = (document.getElementById('ms-ssh-host').value     || '').trim();
+  const sshPort     = parseInt(document.getElementById('ms-ssh-port').value) || 22;
+  const sshUsername = (document.getElementById('ms-ssh-username').value || '').trim();
+  const sshKeyPath  = (document.getElementById('ms-ssh-key-path').value || '').trim();
+  const sshKeyPass  = document.getElementById('ms-ssh-key-passphrase').value || '';
+  const statusEl = document.getElementById('ms-discover-status');
+  const rowEl = document.getElementById('ms-vm-project-row');
+
+  if (!sshHost || !sshUsername) {
+    alert('Fill in the VM host and SSH username first.'); return;
+  }
+
+  statusEl.textContent = 'Connecting over SSH…';
+  rowEl.style.display = 'none';
+
+  let res, body;
+  try {
+    res = await fetch('/api/map-sync/vm-projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ssh_host: sshHost, ssh_port: sshPort, ssh_username: sshUsername,
+        ssh_key_path: sshKeyPath, ssh_key_passphrase: sshKeyPass,
+      }),
+    });
+    body = await res.json();
+  } catch (e) {
+    statusEl.textContent = `Failed: ${e}`;
+    return;
+  }
+
+  if (!res.ok) {
+    statusEl.textContent = `Failed: ${body.error || 'request failed'}`;
+    return;
+  }
+
+  msVmProjects = body.projects || [];
+  if (!msVmProjects.length) {
+    statusEl.textContent = 'No RoboShop systems found on that VM.';
+    return;
+  }
+
+  const select = document.getElementById('ms-vm-project-select');
+  select.innerHTML = msVmProjects.map((p, i) =>
+    `<option value="${i}">${escHtml(p.display)}</option>`).join('');
+  statusEl.textContent = `Found ${msVmProjects.length} system(s).`;
+  rowEl.style.display = '';
+}
+
+function msUseVmProject() {
+  const select = document.getElementById('ms-vm-project-select');
+  const project = msVmProjects[parseInt(select.value)];
+  if (!project) return;
+  // Map Sync's "Parent directory" targets the scene/robots folder itself
+  // (one level below DispatchEditor/scene), while the discovered project
+  // path is the project root above DispatchEditor.
+  document.getElementById('ms-base-dir').value =
+    `${project.path}/DispatchEditor/scene/robots`;
+  msUpdatePreview();
+}
 
 function msUpdatePreview() {
   const baseDir   = (document.getElementById('ms-base-dir').value   || '').trim();
@@ -1791,6 +1868,16 @@ async function msExecute() {
     alert('Please fill all required fields and select a source file.'); return;
   }
 
+  const useRemoteAgent = document.getElementById('ms-is-mac').checked;
+  const sshHost     = (document.getElementById('ms-ssh-host').value     || '').trim();
+  const sshPort     = parseInt(document.getElementById('ms-ssh-port').value) || 22;
+  const sshUsername = (document.getElementById('ms-ssh-username').value || '').trim();
+  const sshKeyPath  = (document.getElementById('ms-ssh-key-path').value || '').trim();
+  const sshKeyPass  = document.getElementById('ms-ssh-key-passphrase').value || '';
+  if (useRemoteAgent && (!sshHost || !sshUsername)) {
+    alert('"I\'m using a Mac" is checked — please fill in the VM host and SSH username.'); return;
+  }
+
   if (msEventSource) { msEventSource.close(); msEventSource = null; }
 
   document.getElementById('ms-log').innerHTML = '';
@@ -1808,6 +1895,12 @@ async function msExecute() {
   fd.append('sub_folder', subFolder);
   fd.append('start',      start);
   fd.append('count',      count);
+  fd.append('use_remote_agent', useRemoteAgent ? '1' : '0');
+  fd.append('ssh_host',      sshHost);
+  fd.append('ssh_port',      sshPort);
+  fd.append('ssh_username',  sshUsername);
+  fd.append('ssh_key_path',       sshKeyPath);
+  fd.append('ssh_key_passphrase', sshKeyPass);
 
   let res;
   try { res = await fetch('/api/map-sync/execute', { method: 'POST', body: fd }); }
@@ -1863,4 +1956,99 @@ function msRenderResult(msg) {
     </div>
   `;
   showCard('ms-result-card');
+}
+
+
+// ── DWG → Map ──────────────────────────────────
+
+let dmEventSource = null;
+let dmPreviews = {};
+
+async function dmListBlocks() {
+  const fileEl = document.getElementById('dm-file');
+  if (!fileEl.files.length) { alert('Please select a .dwg or .dxf file.'); return; }
+
+  if (dmEventSource) { dmEventSource.close(); dmEventSource = null; }
+
+  clearLog('dm-log');
+  showCard('dm-status-card');
+  showCard('dm-result-card', false);
+  document.getElementById('dm-live-dot').style.display = '';
+  setBtnLoading('dm-run-btn', true, '⏳ Reading…');
+  appendLog('dm-log', `Uploading ${fileEl.files[0].name}…`, 'info');
+
+  const fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+
+  let streamId;
+  try {
+    const res = await fetch('/api/dwg-map/list-blocks', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      appendLog('dm-log', data.error || 'Request failed', 'err');
+      document.getElementById('dm-live-dot').style.display = 'none';
+      setBtnLoading('dm-run-btn', false, '▶ List Block IDs');
+      return;
+    }
+    streamId = data.stream_id;
+  } catch (e) {
+    appendLog('dm-log', `Upload failed: ${e}`, 'err');
+    document.getElementById('dm-live-dot').style.display = 'none';
+    setBtnLoading('dm-run-btn', false, '▶ List Block IDs');
+    return;
+  }
+
+  dmEventSource = new EventSource(`/api/dwg-map/stream/${streamId}`);
+
+  dmEventSource.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === 'log') {
+      appendLog('dm-log', msg.msg, msg.level || 'info');
+    }
+    if (msg.type === 'result') {
+      const blocks = msg.blocks || [];
+      dmPreviews = msg.previews || {};
+      const tbody = document.getElementById('dm-blocks-tbody');
+      tbody.innerHTML = blocks.map((name, i) => {
+        const svg = dmPreviews[name];
+        const cell = svg
+          ? `<div class="dm-thumb" data-block-name="${escHtml(name)}">${svg}</div>`
+          : `<div class="dm-thumb dm-thumb-empty">no geometry</div>`;
+        return `<tr><td>${i + 1}</td><td>${escHtml(name)}</td><td>${cell}</td></tr>`;
+      }).join('');
+      document.getElementById('dm-count-badge').textContent = `(${blocks.length})`;
+      tbody.querySelectorAll('.dm-thumb[data-block-name]').forEach(el => {
+        el.addEventListener('click', () => dmShowPreview(el.dataset.blockName));
+      });
+      showCard('dm-result-card');
+    }
+    if (msg.type === 'done') {
+      dmEventSource.close();
+      dmEventSource = null;
+      document.getElementById('dm-live-dot').style.display = 'none';
+      setBtnLoading('dm-run-btn', false, '▶ List Block IDs');
+    }
+  };
+
+  dmEventSource.onerror = () => {
+    appendLog('dm-log', 'Stream connection lost', 'err');
+    if (dmEventSource) { dmEventSource.close(); dmEventSource = null; }
+    document.getElementById('dm-live-dot').style.display = 'none';
+    setBtnLoading('dm-run-btn', false, '▶ List Block IDs');
+  };
+}
+
+function dmShowPreview(name) {
+  const svg = dmPreviews[name];
+  if (!svg) return;
+  document.getElementById('dm-preview-title').textContent = `Block preview — ${name}`;
+  document.getElementById('dm-preview-body').innerHTML = svg;
+  document.getElementById('dm-preview-overlay').style.display = '';
+}
+
+function dmClosePreview(event) {
+  if (event && event.target !== document.getElementById('dm-preview-overlay')) return;
+  document.getElementById('dm-preview-overlay').style.display = 'none';
 }

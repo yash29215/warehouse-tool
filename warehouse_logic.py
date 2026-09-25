@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 import heapq
 import numpy as np
 import pandas as pd
+import ezdxf
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
@@ -1664,3 +1665,57 @@ class OrderfileOptimizer:
 def orderfile_to_excel(df, output_path):
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Orders')
+
+
+# ─────────────────────────────────────────────
+# Tab 7 — DWG → Map
+# ─────────────────────────────────────────────
+
+def list_dwg_block_names(dxf_path):
+    """
+    Step 1 of DWG -> SMAP conversion. Takes a DXF path (ezdxf can't read
+    binary .dwg directly — that conversion happens separately, see
+    _convert_dwg_to_dxf in app.py) and returns the distinct block
+    DEFINITION names present in the drawing, sorted alphabetically.
+
+    Anonymous/internal blocks (name starts with "*" — e.g. *Model_Space,
+    *Paper_Space, and the hidden helper blocks dimensions/hatches generate)
+    are excluded since the user never placed those deliberately.
+    """
+    doc = ezdxf.readfile(dxf_path)
+    names = {b.name for b in doc.blocks if not b.name.startswith("*")}
+    return sorted(names)
+
+
+def render_dwg_block_previews(dxf_path, block_names):
+    """
+    Renders each named block DEFINITION's own geometry (not the instances
+    placed in modelspace, the definition itself) as a standalone SVG
+    thumbnail, so a user can see what a given block ID actually looks like.
+
+    Returns {name: svg_markup}. A block with no geometry drawn directly
+    inside its definition (e.g. an empty placeholder, or one that only
+    nests other blocks with nothing of its own) maps to None.
+    """
+    from ezdxf.addons.drawing import RenderContext, Frontend
+    from ezdxf.addons.drawing.svg import SVGBackend
+    from ezdxf.addons.drawing.config import Configuration
+    from ezdxf.addons.drawing.layout import Page
+
+    doc = ezdxf.readfile(dxf_path)
+    ctx = RenderContext(doc)
+    previews = {}
+    for name in block_names:
+        block = doc.blocks.get(name)
+        entities = list(block) if block is not None else []
+        if not entities:
+            previews[name] = None
+            continue
+        backend = SVGBackend()
+        frontend = Frontend(ctx, backend, config=Configuration())
+        try:
+            frontend.draw_entities(entities)
+            previews[name] = backend.get_string(page=Page(0, 0))
+        except Exception:
+            previews[name] = None
+    return previews
