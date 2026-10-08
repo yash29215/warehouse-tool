@@ -863,6 +863,26 @@ def map_validator_validate():
                                      "msg": "Running validation…"})
             result = wl.run_map_validation(data, detailed_review=detailed_review)
 
+            n_broken = result.get("n_broken", 0)
+            if n_broken:
+                edge_strs = [f"{e['src']}→{e['dst']}" for e in result.get("broken_edges", [])]
+                preview = ", ".join(edge_strs[:10])
+                if n_broken > 10:
+                    preview += f", +{n_broken - 10} more"
+                _push_event(stream_id, {
+                    "type": "log", "level": "warn",
+                    "msg": f"Found {n_broken} broken path(s) in the map — excluded from "
+                           f"routing and connectivity checks: {preview}"
+                })
+                if result.get("broken_causes_disconnection"):
+                    _push_event(stream_id, {
+                        "type": "log", "level": "err",
+                        "msg": f"These broken path(s) are the cause of real unreachable "
+                               f"location(s): without them the map splits into "
+                               f"{result['n_sccs']} disconnected group(s) instead of "
+                               f"{result['n_sccs_if_fixed']}."
+                    })
+
             if detailed_review:
                 n_removed = result.get("n_removed", 0)
                 if n_removed:
@@ -1344,6 +1364,23 @@ def map_sync_stream(stream_id):
 # --build-arg INSTALL_ODA=true (see the Dockerfile for setup steps).
 ODA_FILE_CONVERTER = os.environ.get("ODA_FILE_CONVERTER_PATH", "/usr/bin/ODAFileConverter")
 
+DWG_CACHE_MAX_AGE = 3600  # seconds a cached DXF survives between list-blocks and generate-smap
+
+
+def _cleanup_dwg_cache():
+    """Removes cached DXFs from previous DWG -> Map sessions older than
+    DWG_CACHE_MAX_AGE, so re-listing/regenerating within that window still
+    works without re-uploading, but old sessions don't pile up on disk."""
+    now = time.time()
+    for name in os.listdir(UPLOAD_DIR):
+        if name.startswith("dwgcache_") and name.endswith(".dxf"):
+            path = os.path.join(UPLOAD_DIR, name)
+            try:
+                if now - os.path.getmtime(path) > DWG_CACHE_MAX_AGE:
+                    os.remove(path)
+            except OSError:
+                pass
+
 
 def _convert_dwg_to_dxf(dwg_path: str) -> str:
     """Converts a .dwg file to .dxf via the ODA File Converter CLI, run under
@@ -1408,6 +1445,7 @@ def dwg_map_list_blocks():
     if ext not in (".dwg", ".dxf"):
         return jsonify({"error": "Please upload a .dwg or .dxf file"}), 400
 
+    _cleanup_dwg_cache()
     src_path = _save_upload(f, "dwgmap")
     stream_id = uuid.uuid4().hex
 
@@ -1441,10 +1479,21 @@ def dwg_map_list_blocks():
             _push_event(stream_id, {"type": "log", "level": "info",
                                      "msg": "Rendering block previews…"})
             previews = wl.render_dwg_block_previews(dxf_path, blocks)
-            _push_event(stream_id, {"type": "log", "level": "ok", "msg": "Done."})
 
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "Reading block attributes…"})
+            block_attrs = wl.get_block_attribute_tags(dxf_path, blocks)
+
+            # Keep a copy so step 2 (generate-smap) can re-read instance
+            # positions/attributes without the user re-uploading the DWG.
+            cache_token = uuid.uuid4().hex
+            cache_path = os.path.join(UPLOAD_DIR, f"dwgcache_{cache_token}.dxf")
+            shutil.copy2(dxf_path, cache_path)
+
+            _push_event(stream_id, {"type": "log", "level": "ok", "msg": "Done."})
             _push_event(stream_id, {"type": "result", "blocks": blocks, "count": len(blocks),
-                                     "previews": previews})
+                                     "previews": previews, "block_attrs": block_attrs,
+                                     "cache_token": cache_token})
         except Exception as e:
             _push_event(stream_id, {"type": "log", "level": "err", "msg": str(e)})
         finally:
@@ -1486,6 +1535,66 @@ def dwg_map_stream(stream_id):
 
     return Response(_generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/dwg-map/generate-smap", methods=["POST"])
+def dwg_map_generate_smap():
+    """Step 2 of DWG -> SMAP: given the block->type/attribute selections made
+    against a previously-listed DWG (see cache_token) and an uploaded base
+    .smap file, appends one point per block instance into that file's
+    advancedPointList and returns the merged file for download."""
+    if "base_smap" not in request.files:
+        return jsonify({"error": "No base .smap file uploaded"}), 400
+
+    cache_token = request.form.get("cache_token", "").strip()
+    if not cache_token or "/" in cache_token or "\\" in cache_token:
+        return jsonify({"error": "Missing or invalid cache_token — list the DWG's blocks again"}), 400
+
+    cache_path = os.path.join(UPLOAD_DIR, f"dwgcache_{cache_token}.dxf")
+    if not os.path.exists(cache_path):
+        return jsonify({"error": "This DWG session has expired — please re-upload and list blocks again"}), 400
+
+    try:
+        selections = json.loads(request.form.get("selections", "{}"))
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": f"Invalid selections: {e}"}), 400
+    if not selections:
+        return jsonify({"error": "Select at least one block and assign it a type"}), 400
+
+    base_path = _save_upload(request.files["base_smap"], "basesmap")
+    try:
+        base_data = _load_json_file(base_path)
+    except Exception as e:
+        return jsonify({"error": f"Cannot parse base .smap file: {e}"}), 400
+    finally:
+        try:
+            os.remove(base_path)
+        except OSError:
+            pass
+
+    existing_names = {p.get("instanceName") for p in base_data.get("advancedPointList", [])}
+    try:
+        points, warnings = wl.build_points_from_selections(cache_path, selections, existing_names)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not points:
+        return jsonify({"error": "None of the selected blocks have any placed "
+                                  "instances in the drawing"}), 400
+
+    merged, n_added, n_skipped = wl.merge_points_into_smap(base_data, points)
+
+    out_name = f"merged_{uuid.uuid4().hex}.smap"
+    with open(_dl_path(out_name), "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, indent=2)
+
+    return jsonify({
+        "download": f"/api/downloads/{out_name}",
+        "filename": out_name,
+        "n_added": n_added,
+        "n_skipped": n_skipped,
+        "warnings": warnings,
+    })
 
 
 # ─────────────────────────────────────────────

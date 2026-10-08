@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from collections import defaultdict, deque
 
@@ -103,6 +104,19 @@ def validate_excel_for_ndeep(df):
 # Graph construction
 # ─────────────────────────────────────────────
 
+def _curve_is_broken(curve):
+    """True if this curve's "broken" property is set to true — a disabled
+    path the robot can't actually traverse. Real maps do have a few of these
+    (e.g. temporarily disabled during a layout change), and they must be
+    excluded from both pathfinding and connectivity/reachability checks —
+    otherwise a route or a "fully connected" verdict can rely on a curve
+    that doesn't actually work."""
+    for p in curve.get("property", []) or []:
+        if p.get("key") == "broken" and p.get("boolValue") is True:
+            return True
+    return False
+
+
 def build_graph_from_json(json_data):
     graph = {}
     node_positions = {}
@@ -129,6 +143,8 @@ def build_graph_from_json(json_data):
         except Exception:
             continue
     for curve in json_data.get("advancedCurveList", []):
+        if _curve_is_broken(curve):
+            continue
         start = curve.get("startPos", {}).get("instanceName")
         end = curve.get("endPos", {}).get("instanceName")
         if not start or not end:
@@ -1173,12 +1189,17 @@ def run_map_validation(json_data, detailed_review=False):
 
     outgoing = defaultdict(set)
     incoming = defaultdict(set)
+    broken_edges = []  # (src, dst) pairs excluded for being marked "broken"
     for curve in curves:
         src = (curve.get("startPos") or {}).get("instanceName")
         dst = (curve.get("endPos") or {}).get("instanceName")
-        if src and dst and src != dst:
-            outgoing[src].add(dst)
-            incoming[dst].add(src)
+        if not src or not dst or src == dst:
+            continue
+        if _curve_is_broken(curve):
+            broken_edges.append((src, dst))
+            continue
+        outgoing[src].add(dst)
+        incoming[dst].add(src)
 
     all_points = {}
     for pt in points:
@@ -1207,6 +1228,22 @@ def run_map_validation(json_data, detailed_review=False):
 
     conn_rows, n_sccs = check_connectivity(pruned_points, pruned_out)
 
+    # If there are broken curves, check whether they're actually responsible
+    # for any of the disconnection above — add their edges back in (scoped to
+    # the same point set already in play) and see if that merges SCC groups
+    # back together. If it does, the broken curve(s) are a real cause of
+    # unreachable locations, not just inert metadata.
+    n_broken = len(broken_edges)
+    broken_causes_disconnection = False
+    n_sccs_if_fixed = n_sccs
+    if n_broken:
+        out_if_fixed = {k: set(v) for k, v in pruned_out.items()}
+        for src, dst in broken_edges:
+            if src in pruned_points and dst in pruned_points:
+                out_if_fixed.setdefault(src, set()).add(dst)
+        _, n_sccs_if_fixed = check_connectivity(pruned_points, out_if_fixed)
+        broken_causes_disconnection = n_sccs_if_fixed < n_sccs
+
     return {
         "all_points": pruned_points,
         "issues": issues,
@@ -1225,6 +1262,10 @@ def run_map_validation(json_data, detailed_review=False):
         "n_removed": len(removed),
         "total_before": len(all_points),
         "detailed_review": detailed_review,
+        "n_broken": n_broken,
+        "broken_edges": [{"src": s, "dst": d} for s, d in sorted(broken_edges)],
+        "broken_causes_disconnection": broken_causes_disconnection,
+        "n_sccs_if_fixed": n_sccs_if_fixed,
     }
 
 
@@ -1719,3 +1760,132 @@ def render_dwg_block_previews(dxf_path, block_names):
         except Exception:
             previews[name] = None
     return previews
+
+
+def get_block_attribute_tags(dxf_path, block_names):
+    """
+    Returns {block_name: [attribute_tag, ...]} — the ATTDEF tags defined
+    inside each block's own definition, in definition order. A block with no
+    attributes maps to an empty list (its instances can only be auto-named).
+    """
+    doc = ezdxf.readfile(dxf_path)
+    result = {}
+    for name in block_names:
+        block = doc.blocks.get(name)
+        tags = [e.dxf.tag for e in block if e.dxftype() == "ATTDEF"] if block else []
+        result[name] = tags
+    return result
+
+
+_POINT_TYPE_CLASS_NAMES = {
+    "AP": "ActionPoint",
+    "LM": "LocationMark",
+    "PP": "ParkPoint",
+    "CP": "ChargePoint",
+}
+
+_INSTANCE_NAME_NUM_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def _max_existing_numbers(existing_names):
+    """
+    Given instanceNames like "LM111", "AP110", "PP8396", returns
+    {"LM": 111, "AP": 110, "PP": 8396, ...} — the highest number already
+    used per prefix, so auto-numbering can continue after it instead of
+    restarting at 1 and colliding with everything already in the map.
+    """
+    highest = defaultdict(int)
+    for name in existing_names:
+        m = _INSTANCE_NAME_NUM_RE.match(name or "")
+        if m:
+            prefix, num = m.group(1), int(m.group(2))
+            highest[prefix] = max(highest[prefix], num)
+    return highest
+
+
+def build_points_from_selections(dxf_path, selections, existing_names=()):
+    """
+    selections: {block_name: {"type": "AP"|"LM"|"PP"|"CP", "attr_tag": str|None}}
+    existing_names: instanceNames already present in the base map being
+    merged into (e.g. "LM111", "AP110") — auto-numbering below continues
+    after the highest existing number per type instead of restarting at 1,
+    which would otherwise collide with (and get silently skipped as
+    duplicates of) real points already in the map.
+
+    Finds every INSERT of each selected block in modelspace and turns it into
+    an advancedPointList-shaped dict matching the real .smap schema:
+    {"className", "instanceName", "pos": {"x", "y"}, "dir", "property"}.
+
+    instanceName comes from the chosen attribute's value on that instance
+    when attr_tag is given; falls back to an auto-numbered "{type}{n}" (in
+    document order) when attr_tag is omitted or blank on a given instance.
+
+    dir is the block's own insertion rotation, converted from degrees (DXF)
+    to radians (.smap). property defaults to the single "spin": false entry
+    seen on every point in a real production map — nothing in the DWG maps
+    to this, so it's a fixed default rather than derived.
+
+    Returns (points, warnings) — warnings note any instance that fell back to
+    auto-naming despite an attr_tag being requested.
+    """
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+
+    points = []
+    warnings = []
+    counters = defaultdict(int, _max_existing_numbers(existing_names))
+    default_property = [{"key": "spin", "type": "bool", "value": "ZmFsc2U=", "boolValue": False}]
+
+    for block_name, sel in selections.items():
+        ptype = sel.get("type")
+        class_name = _POINT_TYPE_CLASS_NAMES.get(ptype)
+        if class_name is None:
+            continue
+        attr_tag = sel.get("attr_tag") or None
+
+        for e in msp.query("INSERT"):
+            if e.dxf.name != block_name:
+                continue
+            x, y = e.dxf.insert.x, e.dxf.insert.y
+            dir_rad = math.radians(e.dxf.rotation)
+            attribs = {a.dxf.tag: a.dxf.text for a in e.attribs}
+            name = attribs.get(attr_tag) if attr_tag else None
+            if not name:
+                counters[ptype] += 1
+                name = f"{ptype}{counters[ptype]}"
+                if attr_tag:
+                    warnings.append(
+                        f"{block_name} instance at ({x:.1f}, {y:.1f}) had no "
+                        f"'{attr_tag}' value — auto-named {name} instead."
+                    )
+            points.append({
+                "className": class_name,
+                "instanceName": name,
+                "pos": {"x": x, "y": y},
+                "dir": dir_rad,
+                "property": [dict(p) for p in default_property],
+            })
+    return points, warnings
+
+
+def merge_points_into_smap(base_smap_data, new_points):
+    """
+    Appends new_points into base_smap_data's advancedPointList, skipping any
+    whose instanceName already exists in the base map (existing points win —
+    never silently overwritten). Returns (merged_data, n_added, n_skipped).
+    """
+    existing_names = {
+        p.get("instanceName") for p in base_smap_data.get("advancedPointList", [])
+    }
+    merged = dict(base_smap_data)
+    point_list = list(merged.get("advancedPointList", []))
+    n_added = n_skipped = 0
+    for pt in new_points:
+        if pt["instanceName"] in existing_names:
+            n_skipped += 1
+            continue
+        point_list.append(pt)
+        existing_names.add(pt["instanceName"])
+        n_added += 1
+    merged["advancedPointList"] = point_list
+    return merged, n_added, n_skipped
