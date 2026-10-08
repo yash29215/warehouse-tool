@@ -59,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireFileInput('of-file', 'of-filename', ofOnFileSelected);
   wireFileInput('ms-file', 'ms-filename', msUpdatePreview);
   wireFileInput('dm-file', 'dm-filename');
+  wireFileInput('dm-base-smap', 'dm-base-smap-name');
 
   document.getElementById('cp-cross-aisle').addEventListener('change', function () {
     document.getElementById('cp-sensitivity-wrap').style.display =
@@ -167,6 +168,7 @@ const cpMap = {
   canvas: null,
   ctx: null,
   points: [],           // [{name, type:"AP"|"LM", x, y}]
+  curves: [],            // [{sx, sy, ex, ey}]
   loading: new Set(),
   unloading: new Set(),
   crossAisle: new Set(),
@@ -247,6 +249,7 @@ function cpLoadPointsFromJson(data) {
     }
   });
   cpMap.points = pts;
+  cpMap.curves = extractCurvesFromMapJson(data);
   cpMap.loading.clear();
   cpMap.unloading.clear();
   cpMap.crossAisle.clear();
@@ -301,6 +304,27 @@ function cpRedraw() {
     ctx.textAlign = 'center';
     ctx.fillText('Select a map file to view points', w / 2, h / 2);
     return;
+  }
+
+  if (document.getElementById('cp-show-paths').checked && cpMap.curves.length) {
+    ctx.beginPath();
+    for (const c of cpMap.curves) drawCurvePath(ctx, cpW2C, c, true);
+    ctx.strokeStyle = 'rgba(128, 131, 255, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Direction arrows only once zoomed in enough to make sense of individual
+    // segments — at a zoomed-out view of a huge map they'd just be clutter,
+    // and skipping them keeps redraws cheap while panning/zooming out.
+    if (cpMap.scale > 15) {
+      ctx.beginPath();
+      for (const c of cpMap.curves) {
+        const a = curveMidpointAngle(cpW2C, c);
+        if (a) addArrowHeadToPath(ctx, a.x, a.y, a.angle, 5);
+      }
+      ctx.fillStyle = 'rgba(160, 163, 255, 0.6)';
+      ctx.fill();
+    }
   }
 
   const showAP  = document.getElementById('cp-show-ap').checked;
@@ -536,6 +560,7 @@ const p2pMap = {
   canvas: null,
   ctx: null,
   points: [],
+  curves: [],              // [{sx, sy, ex, ey}]
   subzoneTargetIdx: null,  // non-null = drawing subzones for this zone index
   scale: 1, panX: 0, panY: 0, worldCx: 0, worldCy: 0,
   dragMode: null, dragLast: null,
@@ -597,6 +622,7 @@ function p2pLoadPointsFromJson(data) {
     }
   });
   p2pMap.points = pts;
+  p2pMap.curves = extractCurvesFromMapJson(data);
   showCard('p2p-map-card');
   p2pResizeCanvas();
   p2pFitAll();
@@ -653,6 +679,24 @@ function p2pRedraw() {
     ctx.textAlign = 'center';
     ctx.fillText('Select a map file to view points', w / 2, h / 2);
     return;
+  }
+
+  if (document.getElementById('p2p-show-paths').checked && p2pMap.curves.length) {
+    ctx.beginPath();
+    for (const c of p2pMap.curves) drawCurvePath(ctx, p2pW2C, c, true);
+    ctx.strokeStyle = 'rgba(128, 131, 255, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    if (p2pMap.scale > 15) {
+      ctx.beginPath();
+      for (const c of p2pMap.curves) {
+        const a = curveMidpointAngle(p2pW2C, c);
+        if (a) addArrowHeadToPath(ctx, a.x, a.y, a.angle, 5);
+      }
+      ctx.fillStyle = 'rgba(160, 163, 255, 0.6)';
+      ctx.fill();
+    }
   }
 
   const showAP  = document.getElementById('p2p-show-ap').checked;
@@ -1088,7 +1132,8 @@ async function analyzeCasePick() {
     document.getElementById('cp-aisle-count').textContent = data.aisle_count;
     document.getElementById('cp-ap-count').textContent = data.ap_count;
     renderAisleTable();
-    showCard('cp-aisles-card');
+    cpPopulateLoadingPointDropdown();
+    showCard('cp-aisles-card', !document.getElementById('cp-auto-sequence').checked);
 
     showCard('cp-output-card');
     showCard('cp-action-card');
@@ -1128,7 +1173,6 @@ function renderAisleTable() {
       const idx = parseInt(cell.dataset.idx);
       cpAisles[idx].direction = cpAisles[idx].direction === 'f2l' ? 'l2f' : 'f2l';
       cell.textContent = cpAisles[idx].direction === 'f2l' ? 'First→Last' : 'Last→First';
-      _switchToManualMode();
     });
   });
   tbody.querySelectorAll('.aisle-name-input').forEach(inp => {
@@ -1139,19 +1183,28 @@ function renderAisleTable() {
   });
 }
 
-function _switchToManualMode() {
-  // No-op now that the Mode dropdown has been removed (sequence always runs
-  // in manual mode honouring the table's per-aisle direction toggles).
-}
-
 function setAllDirections(dir) {
   cpAisles.forEach(a => a.direction = dir);
   renderAisleTable();
-  _switchToManualMode();
 }
 
-function onModeChange() {
-  // No-op — Mode dropdown removed; sequence is always manual.
+function cpOnAutoToggle() {
+  const auto = document.getElementById('cp-auto-sequence').checked;
+  document.getElementById('cp-auto-loading-wrap').style.display = auto ? '' : 'none';
+  if (cpAnalyzed) showCard('cp-aisles-card', !auto);
+  if (auto) cpPopulateLoadingPointDropdown();
+}
+
+function cpPopulateLoadingPointDropdown() {
+  const list = document.getElementById('cp-auto-loading-point-list');
+  const names = [...cpMap.points].sort((a, b) => a.name.localeCompare(b.name));
+  list.innerHTML = names.map(p =>
+    `<option value="${escHtml(p.name)}">${escHtml(p.name)} (${p.type})</option>`).join('');
+}
+
+function cpResolveLoadingPoint() {
+  const typed = (document.getElementById('cp-auto-loading-point').value || '').trim();
+  return cpMap.points.some(p => p.name === typed) ? typed : '';
 }
 
 function onDupToggle() {
@@ -1165,6 +1218,13 @@ async function generateCasePick() {
   const mapPath = (document.getElementById('cp-map-path').value || '').trim();
   if (!fileEl.files.length && !mapPath) {
     alert('Please pick a map file (Browse) or enter a Map Path.');
+    return;
+  }
+
+  const autoMode = document.getElementById('cp-auto-sequence').checked;
+  const autoLoadingPoint = autoMode ? cpResolveLoadingPoint() : '';
+  if (autoMode && !autoLoadingPoint) {
+    alert('Loading / Start Point is empty or doesn\'t match a point on the map — search and pick one from the list.');
     return;
   }
 
@@ -1185,23 +1245,29 @@ async function generateCasePick() {
   if (mapPath)             fd.append('map_path', mapPath);
   if (outputPath)          fd.append('output_path', outputPath);
   if (templateEl.files.length) fd.append('template', templateEl.files[0]);
-  // Sequence always runs in manual mode; per-aisle direction comes from the
-  // AISLES DETECTED table (default "f2l" if the user did not toggle).
-  fd.append('mode', 'manual');
   fd.append('orientation', document.getElementById('cp-orientation').value);
   fd.append('cross_aisle', document.getElementById('cp-cross-aisle').checked);
   fd.append('sensitivity', document.getElementById('cp-sensitivity').value);
   fd.append('duplication', dup);
-  fd.append('aisle_directions',
-    JSON.stringify(cpAisles.map(a => ({ index: a.index, direction: a.direction }))));
-  // Send the EXACT aisle structure (AP names + direction + name) the user saw
-  // in the table — keeps per-aisle settings aligned with the aisles configured.
-  fd.append('manual_aisles',
-    JSON.stringify(cpAisles.map(a => ({
-      aps: a.aps,
-      direction: a.direction,
-      name: (a.name || '').trim(),
-    }))));
+
+  if (autoMode) {
+    // System computes aisle order + per-aisle direction from this one start
+    // point (nearest-neighbour + serpentine) — no per-aisle config needed.
+    fd.append('mode', 'automatic');
+    fd.append('loading_point', autoLoadingPoint);
+  } else {
+    fd.append('mode', 'manual');
+    fd.append('aisle_directions',
+      JSON.stringify(cpAisles.map(a => ({ index: a.index, direction: a.direction }))));
+    // Send the EXACT aisle structure (AP names + direction + name) the user saw
+    // in the table — keeps per-aisle settings aligned with the aisles configured.
+    fd.append('manual_aisles',
+      JSON.stringify(cpAisles.map(a => ({
+        aps: a.aps,
+        direction: a.direction,
+        name: (a.name || '').trim(),
+      }))));
+  }
   fd.append('excluded_aps',         JSON.stringify([...cpMap.excluded]));
   fd.append('loading_aps',          JSON.stringify([...cpMap.loading]));
   fd.append('unloading_aps',        JSON.stringify([...cpMap.unloading]));
@@ -1444,6 +1510,105 @@ function detectLevel(msg) {
   if (/warn|⚠/i.test(msg)) return 'warn';
   if (/✅|success|complete|done/i.test(msg)) return 'ok';
   return 'info';
+}
+
+function extractCurvesFromMapJson(data) {
+  const curves = [];
+  (data.advancedCurveList || []).forEach(c => {
+    const sp = (c.startPos || {}).pos, ep = (c.endPos || {}).pos;
+    if (!sp || !ep || !('x' in sp) || !('y' in sp) || !('x' in ep) || !('y' in ep)) return;
+    const curve = {
+      type: c.className || 'StraightPath',
+      sx: parseFloat(sp.x), sy: parseFloat(sp.y),
+      ex: parseFloat(ep.x), ey: parseFloat(ep.y),
+    };
+    // BezierPath / DegenerateBezier: exact cubic-Bezier control points.
+    // NURBS6: 4 control points — no knot vector is given, so we approximate
+    // with a Catmull-Rom spline through all 6 points rather than a true
+    // NURBS evaluation (drawCurvePath / curveMidpointAngle below).
+    ['controlPos1', 'controlPos2', 'controlPos3', 'controlPos4'].forEach((key, i) => {
+      const cp = c[key];
+      if (cp && 'x' in cp && 'y' in cp) {
+        curve['c' + (i + 1) + 'x'] = parseFloat(cp.x);
+        curve['c' + (i + 1) + 'y'] = parseFloat(cp.y);
+      }
+    });
+    curves.push(curve);
+  });
+  return curves;
+}
+
+// Adds one curve's geometry to the current canvas path (call ctx.beginPath()
+// before and ctx.stroke() after a batch of these). w2c converts world -> canvas px.
+function drawCurvePath(ctx, w2c, curve, moveToStart) {
+  const [sx, sy] = w2c(curve.sx, curve.sy);
+  const [ex, ey] = w2c(curve.ex, curve.ey);
+  if (moveToStart) ctx.moveTo(sx, sy);
+  if (curve.c4x !== undefined) {
+    // NURBS6 (approximated): Catmull-Rom spline through start, 4 control
+    // points, and end — clamped at both ends.
+    const pts = [[sx, sy],
+      ...[1, 2, 3, 4].map(i => w2c(curve['c' + i + 'x'], curve['c' + i + 'y'])),
+      [ex, ey]];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+      const cp1x = p1[0] + (p2[0] - p0[0]) / 6, cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const cp2x = p2[0] - (p3[0] - p1[0]) / 6, cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+    }
+  } else if (curve.c2x !== undefined) {
+    // BezierPath / DegenerateBezier: exact cubic Bezier.
+    const [c1x, c1y] = w2c(curve.c1x, curve.c1y);
+    const [c2x, c2y] = w2c(curve.c2x, curve.c2y);
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, ex, ey);
+  } else {
+    ctx.lineTo(ex, ey);
+  }
+}
+
+// Returns {x, y, angle} (canvas px + radians) at the curve's midpoint, for
+// drawing a direction arrowhead — or null if degenerate (zero-length).
+function curveMidpointAngle(w2c, curve) {
+  const [sx, sy] = w2c(curve.sx, curve.sy);
+  const [ex, ey] = w2c(curve.ex, curve.ey);
+  let mx, my, tx, ty;
+  if (curve.c2x !== undefined && curve.c4x === undefined) {
+    // Exact cubic Bezier: evaluate position + tangent at t=0.5.
+    const [c1x, c1y] = w2c(curve.c1x, curve.c1y);
+    const [c2x, c2y] = w2c(curve.c2x, curve.c2y);
+    const t = 0.5, mt = 1 - t;
+    mx = mt*mt*mt*sx + 3*mt*mt*t*c1x + 3*mt*t*t*c2x + t*t*t*ex;
+    my = mt*mt*mt*sy + 3*mt*mt*t*c1y + 3*mt*t*t*c2y + t*t*t*ey;
+    tx = 3*mt*mt*(c1x-sx) + 6*mt*t*(c2x-c1x) + 3*t*t*(ex-c2x);
+    ty = 3*mt*mt*(c1y-sy) + 6*mt*t*(c2y-c1y) + 3*t*t*(ey-c2y);
+  } else if (curve.c4x !== undefined) {
+    // NURBS6 approximation: use the middle control segment as the tangent.
+    const [c2x, c2y] = w2c(curve.c2x, curve.c2y);
+    const [c3x, c3y] = w2c(curve.c3x, curve.c3y);
+    mx = (c2x + c3x) / 2; my = (c2y + c3y) / 2;
+    tx = c3x - c2x; ty = c3y - c2y;
+  } else {
+    mx = (sx + ex) / 2; my = (sy + ey) / 2;
+    tx = ex - sx; ty = ey - sy;
+  }
+  if (Math.abs(tx) < 1e-6 && Math.abs(ty) < 1e-6) return null;
+  return { x: mx, y: my, angle: Math.atan2(ty, tx) };
+}
+
+// Adds a small filled triangle at (x,y) pointing along angle to the current
+// path (call ctx.beginPath() before and ctx.fill() after a batch of these).
+function addArrowHeadToPath(ctx, x, y, angle, size) {
+  const tip = [x + Math.cos(angle) * size, y + Math.sin(angle) * size];
+  const back = [x - Math.cos(angle) * size * 0.6, y - Math.sin(angle) * size * 0.6];
+  const perp = angle + Math.PI / 2;
+  const w = size * 0.55;
+  ctx.moveTo(tip[0], tip[1]);
+  ctx.lineTo(back[0] + Math.cos(perp) * w, back[1] + Math.sin(perp) * w);
+  ctx.lineTo(back[0] - Math.cos(perp) * w, back[1] - Math.sin(perp) * w);
+  ctx.closePath();
 }
 
 function escHtml(str) {
@@ -1963,6 +2128,8 @@ function msRenderResult(msg) {
 
 let dmEventSource = null;
 let dmPreviews = {};
+let dmBlockAttrs = {};
+let dmCacheToken = null;
 
 async function dmListBlocks() {
   const fileEl = document.getElementById('dm-file');
@@ -2010,19 +2177,39 @@ async function dmListBlocks() {
     if (msg.type === 'result') {
       const blocks = msg.blocks || [];
       dmPreviews = msg.previews || {};
+      dmBlockAttrs = msg.block_attrs || {};
+      dmCacheToken = msg.cache_token || null;
+
+      const typeOptions = ['', 'AP', 'LM', 'PP', 'CP'].map(t =>
+        `<option value="${t}">${t || '— skip —'}</option>`).join('');
+
       const tbody = document.getElementById('dm-blocks-tbody');
       tbody.innerHTML = blocks.map((name, i) => {
         const svg = dmPreviews[name];
-        const cell = svg
+        const previewCell = svg
           ? `<div class="dm-thumb" data-block-name="${escHtml(name)}">${svg}</div>`
           : `<div class="dm-thumb dm-thumb-empty">no geometry</div>`;
-        return `<tr><td>${i + 1}</td><td>${escHtml(name)}</td><td>${cell}</td></tr>`;
+
+        const tags = dmBlockAttrs[name] || [];
+        const attrOptions = ['<option value="">Auto-number</option>']
+          .concat(tags.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`))
+          .join('');
+
+        return `
+          <tr data-block-name="${escHtml(name)}">
+            <td>${i + 1}</td>
+            <td>${escHtml(name)}</td>
+            <td>${previewCell}</td>
+            <td><select class="text-input dm-type-select">${typeOptions}</select></td>
+            <td><select class="text-input dm-attr-select">${attrOptions}</select></td>
+          </tr>`;
       }).join('');
       document.getElementById('dm-count-badge').textContent = `(${blocks.length})`;
       tbody.querySelectorAll('.dm-thumb[data-block-name]').forEach(el => {
         el.addEventListener('click', () => dmShowPreview(el.dataset.blockName));
       });
       showCard('dm-result-card');
+      showCard('dm-generate-card');
     }
     if (msg.type === 'done') {
       dmEventSource.close();
@@ -2051,4 +2238,59 @@ function dmShowPreview(name) {
 function dmClosePreview(event) {
   if (event && event.target !== document.getElementById('dm-preview-overlay')) return;
   document.getElementById('dm-preview-overlay').style.display = 'none';
+}
+
+async function dmGenerateSmap() {
+  const baseFileEl = document.getElementById('dm-base-smap');
+  if (!baseFileEl.files.length) { alert('Please select a base .smap file to add points into.'); return; }
+  if (!dmCacheToken) { alert('List the DWG\'s blocks again first.'); return; }
+
+  const selections = {};
+  document.querySelectorAll('#dm-blocks-tbody tr').forEach(tr => {
+    const name = tr.dataset.blockName;
+    const type = tr.querySelector('.dm-type-select').value;
+    const attrTag = tr.querySelector('.dm-attr-select').value;
+    if (type) selections[name] = { type, attr_tag: attrTag || null };
+  });
+
+  if (Object.keys(selections).length === 0) {
+    alert('Assign a type (AP/LM/PP/CP) to at least one block first.'); return;
+  }
+
+  const logEl = document.getElementById('dm-generate-log');
+  logEl.style.display = '';
+  clearLog('dm-generate-log');
+  showCard('dm-download-row', false);
+  setBtnLoading('dm-generate-btn', true, '⏳ Adding…');
+  appendLog('dm-generate-log', 'Reading block instances and merging…', 'info');
+
+  const fd = new FormData();
+  fd.append('base_smap', baseFileEl.files[0]);
+  fd.append('cache_token', dmCacheToken);
+  fd.append('selections', JSON.stringify(selections));
+
+  let res, body;
+  try {
+    res = await fetch('/api/dwg-map/generate-smap', { method: 'POST', body: fd });
+    body = await res.json();
+  } catch (e) {
+    appendLog('dm-generate-log', `Request failed: ${e}`, 'err');
+    setBtnLoading('dm-generate-btn', false, '▶ Add Selected Points');
+    return;
+  }
+
+  if (!res.ok) {
+    appendLog('dm-generate-log', body.error || 'Request failed', 'err');
+    setBtnLoading('dm-generate-btn', false, '▶ Add Selected Points');
+    return;
+  }
+
+  appendLog('dm-generate-log', `Added ${body.n_added} point(s).`, 'ok');
+  if (body.n_skipped) {
+    appendLog('dm-generate-log', `Skipped ${body.n_skipped} — instanceName already existed in the base map.`, 'warn');
+  }
+  (body.warnings || []).forEach(w => appendLog('dm-generate-log', w, 'warn'));
+
+  setDownload('dm-download-link', 'dm-download-row', body.download, body.filename);
+  setBtnLoading('dm-generate-btn', false, '▶ Add Selected Points');
 }

@@ -155,6 +155,19 @@
               <label class="opt-label">Sensitivity</label>
               <input type="number" class="num-input" id="cp-sensitivity" value="1.5" min="0.5" max="5" step="0.1" />
             </div>
+            <div class="option-group">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-auto-sequence" onchange="cpOnAutoToggle()" />
+                <span class="toggle-label">⚡ Automatic Pick Sequence</span>
+              </label>
+            </div>
+            <div class="option-group" id="cp-auto-loading-wrap" style="display:none">
+              <label class="opt-label">Loading / Start Point</label>
+              <input type="text" class="text-input" id="cp-auto-loading-point"
+                     list="cp-auto-loading-point-list" autocomplete="off"
+                     placeholder="Type to search a point name…" />
+              <datalist id="cp-auto-loading-point-list"></datalist>
+            </div>
           </div>
 
           <div class="action-row">
@@ -196,6 +209,10 @@
               <label class="toggle-wrap">
                 <input type="checkbox" id="cp-show-lm" checked onchange="cpRedraw()" />
                 <span class="toggle-label">LMs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="cp-show-paths" checked onchange="cpRedraw()" />
+                <span class="toggle-label">Paths</span>
               </label>
               <label class="toggle-wrap">
                 <input type="checkbox" id="cp-show-labels" onchange="cpRedraw()" />
@@ -334,6 +351,10 @@
               <label class="toggle-wrap">
                 <input type="checkbox" id="p2p-show-lm" checked onchange="p2pRedraw()" />
                 <span class="toggle-label">LMs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="p2p-show-paths" checked onchange="p2pRedraw()" />
+                <span class="toggle-label">Paths</span>
               </label>
               <label class="toggle-wrap">
                 <input type="checkbox" id="p2p-show-labels" onchange="p2pRedraw()" />
@@ -815,9 +836,32 @@
           <div class="card-label">BLOCK DEFINITIONS FOUND <span id="dm-count-badge" style="font-weight:400;opacity:.6"></span></div>
           <div class="table-wrap">
             <table class="data-table" id="dm-blocks-table">
-              <thead><tr><th>#</th><th>Block name</th><th>Preview</th></tr></thead>
+              <thead><tr>
+                <th>#</th><th>Block name</th><th>Preview</th>
+                <th>Type</th><th>Name from attribute</th>
+              </tr></thead>
               <tbody id="dm-blocks-tbody"></tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- Step 2: merge selected blocks into an existing map -->
+        <div class="card" id="dm-generate-card" style="display:none">
+          <div class="card-label">ADD TO EXISTING .SMAP</div>
+          <div class="file-row">
+            <label class="file-label">Base .smap file</label>
+            <div class="file-input-wrap">
+              <input type="file" id="dm-base-smap" accept=".json,.smap" class="file-input" />
+              <label for="dm-base-smap" class="file-btn">Browse</label>
+              <span class="file-name" id="dm-base-smap-name">No file selected</span>
+            </div>
+          </div>
+          <div style="margin-top:14px;text-align:right">
+            <button class="btn-accent" id="dm-generate-btn" onclick="dmGenerateSmap()">▶ Add Selected Points</button>
+          </div>
+          <div class="log-box" id="dm-generate-log" style="margin-top:12px;display:none"></div>
+          <div class="download-row" id="dm-download-row" style="display:none;margin-top:12px">
+            <a class="btn-success" id="dm-download-link" href="#" download>⬇ Download merged .smap</a>
           </div>
         </div>
 
