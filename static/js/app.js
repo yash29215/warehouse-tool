@@ -29,6 +29,12 @@ function showTab(tabId) {
   if (tabId === 'point-to-point' && p2pMap.points.length) {
     setTimeout(p2pResizeCanvas, 50);
   }
+  if (tabId === 'dwg-map' && dmMap.instances.length) {
+    setTimeout(dmResizeCanvas, 50);
+  }
+  if (tabId === 'map-validator' && mvMap.points.length) {
+    setTimeout(mvResizeCanvas, 50);
+  }
 }
 
 // ── Status bar ────────────────────────────────
@@ -55,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireFileInput('cp-template', 'cp-template-name');
   wireFileInput('p2p-json', 'p2p-json-name', p2pOnFileSelected);
   wireFileInput('p2p-excel', 'p2p-excel-name');
-  wireFileInput('mv-file', 'mv-filename');
+  wireFileInput('mv-file', 'mv-filename', mvOnFileSelected);
   wireFileInput('of-file', 'of-filename', ofOnFileSelected);
   wireFileInput('ms-file', 'ms-filename', msUpdatePreview);
   wireFileInput('dm-file', 'dm-filename');
@@ -68,9 +74,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   cpInitMap();
   p2pInitMap();
+  dmInitMap();
+  mvInitMap();
   window.addEventListener('resize', () => {
     if (cpMap.points.length)  cpResizeCanvas();
     if (p2pMap.points.length) p2pResizeCanvas();
+    if (dmMap.instances.length) dmResizeCanvas();
+    if (mvMap.points.length)  mvResizeCanvas();
   });
 
   fetch('/api/platform').then(r => r.json()).then(data => {
@@ -1371,6 +1381,453 @@ async function generateP2P() {
 }
 
 /* ─────────────────────────────────────────────
+   MAP VALIDATOR — MAP VIEWER (read-only, pan/zoom)
+   Loads the selected file client-side for point/curve geometry, then
+   overlays per-point validation status once a result streams back from
+   the server (see renderValidatorResult / mvApplyResultToMap below).
+   ───────────────────────────────────────────── */
+
+const mvMap = {
+  canvas: null,
+  ctx: null,
+  points: [],  // [{name, type, x, y}]  type: 'AP'|'LM'|'PP'|'CP'
+  curves: [],  // from extractCurvesFromMapJson (src/dst/broken included)
+  scale: 1, panX: 0, panY: 0, worldCx: 0, worldCy: 0,
+  dragMode: null, dragLast: null,
+  status: new Map(),    // name -> {level: 'err'|'warn', issue}
+  removed: new Set(),   // names pruned by Detailed Map Review
+  hover: null,          // currently hovered point, for the tooltip
+  searchMatches: [],    // current search result list
+  searchHighlight: null,// point jumped to via search — stays highlighted until next search
+};
+
+// advancedPointList className -> AP/LM/PP/CP (the latter two only appear on
+// maps built via the DWG → Map tool; everything else defaults to LM).
+function mvTypeFromClassName(cls) {
+  if (cls === 'ActionPoint') return 'AP';
+  if (cls === 'ParkPoint') return 'PP';
+  if (cls === 'ChargePoint') return 'CP';
+  return 'LM';
+}
+
+function mvInitMap() {
+  const canvas = document.getElementById('mv-map-canvas');
+  if (!canvas) return;
+  mvMap.canvas = canvas;
+  mvMap.ctx = canvas.getContext('2d');
+
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('mousedown', mvOnMouseDown);
+  canvas.addEventListener('mousemove', mvOnMouseMove);
+  canvas.addEventListener('mouseup', mvOnMouseUp);
+  canvas.addEventListener('mouseleave', mvOnMouseLeave);
+  canvas.addEventListener('wheel', mvOnWheel, { passive: false });
+
+  const searchInput = document.getElementById('mv-search-input');
+  if (searchInput) {
+    searchInput.addEventListener('blur', () => {
+      setTimeout(() => showCard('mv-search-results', false), 150);
+    });
+    searchInput.addEventListener('focus', () => {
+      if (mvMap.searchMatches.length) showCard('mv-search-results');
+    });
+  }
+}
+
+function mvResizeCanvas() {
+  const canvas = mvMap.canvas;
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width));
+  canvas.height = Math.max(1, Math.floor(rect.height));
+  mvRedraw();
+}
+
+function mvOnFileSelected(file) {
+  mvMap.status.clear();
+  mvMap.removed.clear();
+  mvMap.hover = null;
+  mvMap.searchHighlight = null;
+  mvMap.searchMatches = [];
+  const searchInput = document.getElementById('mv-search-input');
+  if (searchInput) searchInput.value = '';
+  showCard('mv-search-results', false);
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    let data;
+    try { data = JSON.parse(e.target.result); }
+    catch { mvMap.points = []; mvMap.curves = []; showCard('mv-map-card', false); return; }
+    mvLoadPointsFromJson(data);
+  };
+  reader.onerror = () => { mvMap.points = []; mvMap.curves = []; showCard('mv-map-card', false); };
+  reader.readAsText(file);
+}
+
+function mvLoadPointsFromJson(data) {
+  const pts = [];
+  (data.advancedPointList || []).forEach(p => {
+    const name = p.instanceName;
+    const pos = p.pos || {};
+    if (name && 'x' in pos && 'y' in pos) {
+      pts.push({
+        name,
+        type: mvTypeFromClassName(p.className),
+        x: parseFloat(pos.x),
+        y: parseFloat(pos.y),
+      });
+    }
+  });
+  mvMap.points = pts;
+  mvMap.curves = extractCurvesFromMapJson(data);
+  if (!pts.length) { showCard('mv-map-card', false); return; }
+  showCard('mv-map-card');
+  mvResizeCanvas();
+  mvFitAll();
+  mvRedraw();
+}
+
+function mvFitAll() {
+  if (!mvMap.points.length) return;
+  const xs = mvMap.points.map(p => p.x);
+  const ys = mvMap.points.map(p => p.y);
+  mvMap.worldCx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  mvMap.worldCy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const w = Math.max(mvMap.canvas.width, 100);
+  const h = Math.max(mvMap.canvas.height, 100);
+  const spanX = Math.max(Math.max(...xs) - Math.min(...xs), 0.001);
+  const spanY = Math.max(Math.max(...ys) - Math.min(...ys), 0.001);
+  mvMap.scale = Math.min(w / spanX, h / spanY) * 0.85;
+  mvMap.panX = 0;
+  mvMap.panY = 0;
+}
+
+function mvResetView() {
+  mvFitAll();
+  mvRedraw();
+}
+
+function mvW2C(wx, wy) {
+  const w = Math.max(mvMap.canvas.width, 1);
+  const h = Math.max(mvMap.canvas.height, 1);
+  const cx = (wx - mvMap.worldCx) * mvMap.scale + w / 2 + mvMap.panX;
+  const cy = -(wy - mvMap.worldCy) * mvMap.scale + h / 2 + mvMap.panY;
+  return [cx, cy];
+}
+
+function mvC2W(cx, cy) {
+  const w = Math.max(mvMap.canvas.width, 1);
+  const h = Math.max(mvMap.canvas.height, 1);
+  const wx = (cx - w / 2 - mvMap.panX) / mvMap.scale + mvMap.worldCx;
+  const wy = -(cy - h / 2 - mvMap.panY) / mvMap.scale + mvMap.worldCy;
+  return [wx, wy];
+}
+
+// Apply a /api/map-validator/validate result onto the loaded map geometry —
+// called from renderValidatorResult() once the server streams its verdict.
+function mvApplyResultToMap(data) {
+  mvMap.status.clear();
+  mvMap.removed.clear();
+
+  (data.issues || []).forEach(([name, ptType, issue]) => {
+    mvMap.status.set(name, { level: 'warn', issue, type: ptType });
+  });
+  (data.conn_rows || []).forEach(row => {
+    const mark = (names, label) => (names || []).forEach(n => {
+      mvMap.status.set(n, { level: 'err', issue: label, type: row.src_type });
+    });
+    mark(row.src_pts, row.issue);
+    mark(row.dst_pts, `Unreachable from ${row.src_label}`);
+  });
+  (data.removed_points || []).forEach(p => mvMap.removed.add(p.name));
+
+  mvRedraw();
+}
+
+function mvRedraw() {
+  const ctx = mvMap.ctx;
+  if (!ctx) return;
+  const w = mvMap.canvas.width;
+  const h = mvMap.canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!mvMap.points.length) {
+    ctx.fillStyle = '#908fa0';
+    ctx.font = '12px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Select a map file to view points', w / 2, h / 2);
+    return;
+  }
+
+  const showPaths = document.getElementById('mv-show-paths').checked;
+  if (showPaths && mvMap.curves.length) {
+    ctx.beginPath();
+    for (const c of mvMap.curves) if (!c.broken) drawCurvePath(ctx, mvW2C, c, true);
+    ctx.strokeStyle = 'rgba(128, 131, 255, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    const broken = mvMap.curves.filter(c => c.broken);
+    if (broken.length) {
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      for (const c of broken) drawCurvePath(ctx, mvW2C, c, true);
+      ctx.strokeStyle = 'rgba(255, 180, 171, 0.85)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (mvMap.scale > 15) {
+      ctx.beginPath();
+      for (const c of mvMap.curves) {
+        if (c.broken) continue;
+        const a = curveMidpointAngle(mvW2C, c);
+        if (a) addArrowHeadToPath(ctx, a.x, a.y, a.angle, 5);
+      }
+      ctx.fillStyle = 'rgba(160, 163, 255, 0.6)';
+      ctx.fill();
+    }
+  }
+
+  const showTypes = {
+    AP: document.getElementById('mv-show-ap').checked,
+    LM: document.getElementById('mv-show-lm').checked,
+    PP: document.getElementById('mv-show-pp').checked,
+    CP: document.getElementById('mv-show-cp').checked,
+  };
+  const showLbl = document.getElementById('mv-show-labels').checked;
+  const rBase = Math.max(4, Math.min(10, Math.round(mvMap.scale * 0.6)));
+
+  for (const pt of mvMap.points) {
+    if (!showTypes[pt.type]) continue;
+    const [cx, cy] = mvW2C(pt.x, pt.y);
+
+    const isRemoved = mvMap.removed.has(pt.name);
+    const st = mvMap.status.get(pt.name);
+    let fill = 'var(--success)', stroke = '#34d399';
+    if (isRemoved) { fill = 'rgba(144,143,160,0.5)'; stroke = '#908fa0'; }
+    else if (st && st.level === 'err') { fill = '#ff6b6b'; stroke = 'var(--error)'; }
+    else if (st && st.level === 'warn') { fill = 'var(--warning)'; stroke = '#fbbf24'; }
+    else { fill = '#4edea3'; stroke = '#34d399'; }
+
+    mvDrawPointShape(ctx, pt.type, cx, cy, rBase);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (isRemoved) ctx.setLineDash([2, 2]);
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = (st && st.level === 'err') ? 2 : 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (showLbl || mvMap.hover === pt || mvMap.searchHighlight === pt) {
+      ctx.fillStyle = '#908fa0';
+      ctx.font = '8px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(pt.name, cx, cy + rBase + 4);
+    }
+
+    if (mvMap.hover === pt || mvMap.searchHighlight === pt) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rBase + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = mvMap.searchHighlight === pt ? '#F7941D' : '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+}
+
+// AP = circle, LM = diamond, PP = square, CP = triangle — matches the
+// DWG → Map tool's own AP/LM/PP/CP shape convention.
+function mvDrawPointShape(ctx, type, cx, cy, rBase) {
+  const r = type === 'AP' ? rBase : Math.max(3, rBase - 1);
+  ctx.beginPath();
+  if (type === 'AP') {
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  } else if (type === 'PP') {
+    ctx.rect(cx - r, cy - r, r * 2, r * 2);
+  } else if (type === 'CP') {
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r, cy + r);
+    ctx.lineTo(cx - r, cy + r);
+    ctx.closePath();
+  } else {
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r, cy);
+    ctx.lineTo(cx, cy + r);
+    ctx.lineTo(cx - r, cy);
+    ctx.closePath();
+  }
+}
+
+function mvMousePos(e) {
+  const rect = mvMap.canvas.getBoundingClientRect();
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+function mvHitTest(cx, cy) {
+  let best = null, bestD = 10; // px threshold
+  for (const pt of mvMap.points) {
+    const [px, py] = mvW2C(pt.x, pt.y);
+    const d = Math.hypot(px - cx, py - cy);
+    if (d < bestD) { bestD = d; best = pt; }
+  }
+  return best;
+}
+
+function mvShowTooltip(pt, cx, cy) {
+  const tip = document.getElementById('mv-map-tooltip');
+  if (!tip) return;
+  const isRemoved = mvMap.removed.has(pt.name);
+  const st = mvMap.status.get(pt.name);
+  let statusLine;
+  if (isRemoved) {
+    statusLine = `<span class="warn">Removed — bidirectional-only (Detailed Map Review)</span>`;
+  } else if (st) {
+    statusLine = `<span class="${st.level}">${escHtml(st.issue)}</span>`;
+  } else {
+    statusLine = `<span class="ok">OK — has entry &amp; exit path</span>`;
+  }
+  tip.innerHTML = `<strong>${escHtml(pt.name)}</strong> <span style="color:var(--text-lo)">(${pt.type})</span><br>${statusLine}`;
+  tip.style.left = `${Math.min(cx + 12, mvMap.canvas.width - 180)}px`;
+  tip.style.top = `${Math.max(cy - 10, 0)}px`;
+  tip.style.display = '';
+}
+
+function mvHideTooltip() {
+  const tip = document.getElementById('mv-map-tooltip');
+  if (tip) tip.style.display = 'none';
+}
+
+function mvOnMouseDown(e) {
+  mvMap.dragMode = 'pan';
+  mvMap.dragLast = mvMousePos(e);
+  mvMap.canvas.style.cursor = 'grabbing';
+}
+
+function mvOnMouseMove(e) {
+  const pos = mvMousePos(e);
+  if (mvMap.dragMode === 'pan') {
+    mvMap.panX += pos[0] - mvMap.dragLast[0];
+    mvMap.panY += pos[1] - mvMap.dragLast[1];
+    mvMap.dragLast = pos;
+    mvHideTooltip();
+    mvRedraw();
+    return;
+  }
+  const hit = mvHitTest(pos[0], pos[1]);
+  if (hit !== mvMap.hover) {
+    mvMap.hover = hit;
+    mvRedraw();
+  }
+  if (hit) { mvShowTooltip(hit, pos[0], pos[1]); }
+  else { mvHideTooltip(); }
+}
+
+function mvOnMouseUp() {
+  mvMap.dragMode = null;
+  if (mvMap.canvas) mvMap.canvas.style.cursor = 'grab';
+}
+
+function mvOnMouseLeave() {
+  mvMap.dragMode = null;
+  mvMap.hover = null;
+  mvHideTooltip();
+  if (mvMap.canvas) mvMap.canvas.style.cursor = 'grab';
+  mvRedraw();
+}
+
+function mvOnWheel(e) {
+  e.preventDefault();
+  const pos = mvMousePos(e);
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const w = mvMap.canvas.width, h = mvMap.canvas.height;
+  const mxWorld = (pos[0] - w / 2 - mvMap.panX) / mvMap.scale + mvMap.worldCx;
+  const myWorld = -(pos[1] - h / 2 - mvMap.panY) / mvMap.scale + mvMap.worldCy;
+  mvMap.scale *= factor;
+  mvMap.panX = pos[0] - w / 2 - (mxWorld - mvMap.worldCx) * mvMap.scale;
+  mvMap.panY = pos[1] - h / 2 + (myWorld - mvMap.worldCy) * mvMap.scale;
+  mvHideTooltip();
+  mvRedraw();
+}
+
+// ── Search by point name / type (AP, LM, PP, CP) ──
+
+function mvSearchStatusTag(pt) {
+  if (mvMap.removed.has(pt.name)) return ['removed', 'Removed'];
+  const st = mvMap.status.get(pt.name);
+  if (st && st.level === 'err') return ['err', 'Unreachable'];
+  if (st && st.level === 'warn') return ['warn', 'Issue'];
+  return ['ok', 'OK'];
+}
+
+function mvSearchInput() {
+  const resultsEl = document.getElementById('mv-search-results');
+  if (!resultsEl) return;
+  const q = (document.getElementById('mv-search-input').value || '').trim().toLowerCase();
+  const typeFilter = document.getElementById('mv-search-type').value;
+
+  if (!q && !typeFilter) {
+    mvMap.searchMatches = [];
+    showCard('mv-search-results', false);
+    return;
+  }
+
+  const MAX_RESULTS = 30;
+  const matches = mvMap.points
+    .filter(p => (!typeFilter || p.type === typeFilter) && (!q || p.name.toLowerCase().includes(q)))
+    .sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name))
+    .slice(0, MAX_RESULTS);
+
+  mvMap.searchMatches = matches;
+
+  if (!matches.length) {
+    resultsEl.innerHTML = `<div class="map-search-empty">No points match</div>`;
+    showCard('mv-search-results');
+    return;
+  }
+
+  resultsEl.innerHTML = matches.map((p, i) => {
+    const [tag, tagLabel] = mvSearchStatusTag(p);
+    return `
+      <div class="map-search-row" onmousedown="mvSearchJumpTo(${i})">
+        <span class="map-search-type">${escHtml(p.type)}</span>
+        <span class="map-search-name">${escHtml(p.name)}</span>
+        <span class="map-search-tag ${tag}">${tagLabel}</span>
+      </div>`;
+  }).join('');
+  showCard('mv-search-results');
+}
+
+function mvSearchKeydown(e) {
+  if (e.key === 'Enter' && mvMap.searchMatches.length) {
+    e.preventDefault();
+    mvSearchJumpTo(0);
+  } else if (e.key === 'Escape') {
+    document.getElementById('mv-search-input').value = '';
+    mvSearchInput();
+  }
+}
+
+function mvSearchJumpTo(idx) {
+  const pt = mvMap.searchMatches[idx];
+  if (!pt || !mvMap.canvas) return;
+  mvMap.worldCx = pt.x;
+  mvMap.worldCy = pt.y;
+  mvMap.panX = 0;
+  mvMap.panY = 0;
+  if (mvMap.scale < 20) mvMap.scale = 20;
+  mvMap.searchHighlight = pt;
+  mvMap.hover = pt;
+  showCard('mv-search-results', false);
+  mvRedraw();
+  const [cx, cy] = mvW2C(pt.x, pt.y);
+  mvShowTooltip(pt, cx, cy);
+  setStatus(`Map Viewer: jumped to ${pt.name}`);
+}
+
+/* ─────────────────────────────────────────────
    MAP VALIDATOR (SSE)
    ───────────────────────────────────────────── */
 
@@ -1385,6 +1842,9 @@ async function runMapValidator() {
   document.getElementById('mv-issues-tbody').innerHTML = '';
   showCard('mv-summary', false);
   document.getElementById('mv-live-dot').style.display = '';
+  mvMap.status.clear();
+  mvMap.removed.clear();
+  mvRedraw();
   setStatus('Map Validator: uploading…');
 
   if (mvEventSource) { mvEventSource.close(); mvEventSource = null; }
@@ -1442,6 +1902,8 @@ async function runMapValidator() {
 }
 
 function renderValidatorResult(data) {
+  mvApplyResultToMap(data);
+
   const tbody = document.getElementById('mv-issues-tbody');
   tbody.innerHTML = '';
   const MAX_ROWS = 200;
@@ -1512,6 +1974,10 @@ function detectLevel(msg) {
   return 'info';
 }
 
+function _curveIsBrokenJs(curve) {
+  return (curve.property || []).some(p => p.key === 'broken' && p.boolValue === true);
+}
+
 function extractCurvesFromMapJson(data) {
   const curves = [];
   (data.advancedCurveList || []).forEach(c => {
@@ -1521,6 +1987,9 @@ function extractCurvesFromMapJson(data) {
       type: c.className || 'StraightPath',
       sx: parseFloat(sp.x), sy: parseFloat(sp.y),
       ex: parseFloat(ep.x), ey: parseFloat(ep.y),
+      src: (c.startPos || {}).instanceName,
+      dst: (c.endPos || {}).instanceName,
+      broken: _curveIsBrokenJs(c),
     };
     // BezierPath / DegenerateBezier: exact cubic-Bezier control points.
     // NURBS6: 4 control points — no knot vector is given, so we approximate
@@ -2208,8 +2677,13 @@ async function dmListBlocks() {
       tbody.querySelectorAll('.dm-thumb[data-block-name]').forEach(el => {
         el.addEventListener('click', () => dmShowPreview(el.dataset.blockName));
       });
+      tbody.querySelectorAll('.dm-type-select').forEach(el => {
+        el.addEventListener('change', () => { dmUpdateBadges(); dmRedraw(); });
+      });
       showCard('dm-result-card');
       showCard('dm-generate-card');
+
+      dmLoadInstances(msg.instances || {}, msg.backdrop || { paths: [], truncated: false });
     }
     if (msg.type === 'done') {
       dmEventSource.close();
@@ -2253,8 +2727,9 @@ async function dmGenerateSmap() {
     if (type) selections[name] = { type, attr_tag: attrTag || null };
   });
 
-  if (Object.keys(selections).length === 0) {
-    alert('Assign a type (AP/LM/PP/CP) to at least one block first.'); return;
+  if (Object.keys(selections).length === 0 && Object.keys(dmMap.overrides).length === 0) {
+    alert('Assign a type (AP/LM/PP/CP) to at least one block, or paint at least one instance in the viewer.');
+    return;
   }
 
   const logEl = document.getElementById('dm-generate-log');
@@ -2268,6 +2743,7 @@ async function dmGenerateSmap() {
   fd.append('base_smap', baseFileEl.files[0]);
   fd.append('cache_token', dmCacheToken);
   fd.append('selections', JSON.stringify(selections));
+  fd.append('overrides', JSON.stringify(dmMap.overrides));
 
   let res, body;
   try {
@@ -2293,4 +2769,351 @@ async function dmGenerateSmap() {
 
   setDownload('dm-download-link', 'dm-download-row', body.download, body.filename);
   setBtnLoading('dm-generate-btn', false, '▶ Add Selected Points');
+}
+
+/* ─────────────────────────────────────────────
+   DWG → MAP — VISUAL VIEWER (per-instance AP/LM/PP/CP assignment)
+   Mirrors the Case Pick canvas (pan/zoom/drag-select), but paints a type
+   onto individual block instances instead of tagging existing map points.
+   ───────────────────────────────────────────── */
+
+const DM_TYPE_COLORS = {
+  AP: '#8083ff', LM: '#4edea3', PP: '#f59e0b', CP: '#06b6d4',
+};
+
+const dmMap = {
+  canvas: null,
+  ctx: null,
+  instances: [],      // [{blockName, idx, x, y}]
+  backdropPaths: [],  // [[[x,y], ...], ...] — raw drawing geometry (walls/racks/aisles)
+  overrides: {},      // {blockName: {idxStr: "AP"|"LM"|"PP"|"CP"|""}}
+  paintMode: 'AP',    // 'AP'|'LM'|'PP'|'CP'|'SKIP'|'INHERIT'
+  scale: 1, panX: 0, panY: 0, worldCx: 0, worldCy: 0,
+  dragMode: null, dragStart: null, dragLast: null, selActive: false,
+};
+
+function dmInitMap() {
+  const canvas = document.getElementById('dm-map-canvas');
+  if (!canvas) return;
+  dmMap.canvas = canvas;
+  dmMap.ctx = canvas.getContext('2d');
+
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('mousedown', dmOnMouseDown);
+  canvas.addEventListener('mousemove', dmOnMouseMove);
+  canvas.addEventListener('mouseup',   dmOnMouseUp);
+  canvas.addEventListener('mouseleave', dmOnMouseUp);
+  canvas.addEventListener('wheel', dmOnWheel, { passive: false });
+
+  dmSetPaintMode('AP');
+}
+
+function dmResizeCanvas() {
+  const canvas = dmMap.canvas;
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width  = Math.max(1, Math.floor(rect.width));
+  canvas.height = Math.max(1, Math.floor(rect.height));
+  dmRedraw();
+}
+
+function dmLoadInstances(instancesByBlock, backdrop) {
+  const flat = [];
+  Object.entries(instancesByBlock).forEach(([blockName, insts]) => {
+    (insts || []).forEach(inst => {
+      flat.push({ blockName, idx: inst.idx, x: inst.x, y: inst.y });
+    });
+  });
+  dmMap.instances = flat;
+  dmMap.backdropPaths = (backdrop && backdrop.paths) || [];
+  dmMap.overrides = {};
+  dmUpdateBadges();
+
+  if (!flat.length && !dmMap.backdropPaths.length) { showCard('dm-map-card', false); return; }
+
+  showCard('dm-map-card');
+  dmResizeCanvas();
+  dmFitAll();
+  dmRedraw();
+}
+
+function dmFitAll() {
+  // Manual min/max loop, not Math.min(...xs) — the backdrop can carry up to
+  // 150k points, and spreading that many args into Math.min/max overflows
+  // the call stack.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let any = false;
+  for (const p of dmMap.instances) {
+    any = true;
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+  }
+  for (const path of dmMap.backdropPaths) {
+    for (const [x, y] of path) {
+      any = true;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  if (!any) return;
+  dmMap.worldCx = (minX + maxX) / 2;
+  dmMap.worldCy = (minY + maxY) / 2;
+  const w = Math.max(dmMap.canvas.width,  100);
+  const h = Math.max(dmMap.canvas.height, 100);
+  const spanX = Math.max(maxX - minX, 0.001);
+  const spanY = Math.max(maxY - minY, 0.001);
+  dmMap.scale = Math.min(w / spanX, h / spanY) * 0.85;
+  dmMap.panX = 0;
+  dmMap.panY = 0;
+}
+
+function dmResetView() {
+  dmFitAll();
+  dmRedraw();
+}
+
+function dmW2C(wx, wy) {
+  const w = Math.max(dmMap.canvas.width,  1);
+  const h = Math.max(dmMap.canvas.height, 1);
+  const cx = (wx - dmMap.worldCx) * dmMap.scale + w / 2 + dmMap.panX;
+  const cy = -(wy - dmMap.worldCy) * dmMap.scale + h / 2 + dmMap.panY;
+  return [cx, cy];
+}
+
+// Reads the block-level type dropdown from the table above once per redraw
+// (rather than per-point) — this is what an instance falls back to when it
+// has no override of its own.
+function dmBlockDefaults() {
+  const defaults = {};
+  document.querySelectorAll('#dm-blocks-tbody tr').forEach(tr => {
+    defaults[tr.dataset.blockName] = tr.querySelector('.dm-type-select').value;
+  });
+  return defaults;
+}
+
+function dmEffectiveType(blockName, idx, defaults) {
+  const ov = dmMap.overrides[blockName];
+  const key = String(idx);
+  if (ov && key in ov) return ov[key]; // '' means explicitly skipped
+  return defaults[blockName] || '';
+}
+
+function dmRedraw() {
+  const ctx = dmMap.ctx;
+  if (!ctx) return;
+  const w = dmMap.canvas.width;
+  const h = dmMap.canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!dmMap.instances.length && !dmMap.backdropPaths.length) {
+    ctx.fillStyle = '#908fa0';
+    ctx.font = '12px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('List a DWG\'s blocks to view instances', w / 2, h / 2);
+    return;
+  }
+
+  const showDrawing = document.getElementById('dm-show-drawing').checked;
+  if (showDrawing && dmMap.backdropPaths.length) {
+    ctx.beginPath();
+    for (const path of dmMap.backdropPaths) {
+      if (path.length < 2) continue;
+      const [x0, y0] = dmW2C(path[0][0], path[0][1]);
+      ctx.moveTo(x0, y0);
+      for (let i = 1; i < path.length; i++) {
+        const [x, y] = dmW2C(path[i][0], path[i][1]);
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.strokeStyle = 'rgba(199, 196, 215, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  const defaults = dmBlockDefaults();
+  const showLbl = document.getElementById('dm-show-labels').checked;
+  const rBase = Math.max(4, Math.min(10, Math.round(dmMap.scale * 0.6)));
+
+  for (const inst of dmMap.instances) {
+    const type = dmEffectiveType(inst.blockName, inst.idx, defaults);
+    const [cx, cy] = dmW2C(inst.x, inst.y);
+    const hasOverride = !!(dmMap.overrides[inst.blockName] && String(inst.idx) in dmMap.overrides[inst.blockName]);
+
+    const fill = type ? DM_TYPE_COLORS[type] : 'rgba(144,143,160,0.35)';
+    const stroke = hasOverride ? '#ffffff' : (type ? fill : 'rgba(144,143,160,0.6)');
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, rBase, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = hasOverride ? 2 : 1;
+    ctx.stroke();
+
+    if (type) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${Math.max(7, rBase - 2)}px Inter, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(type[0], cx, cy);
+    }
+
+    if (showLbl) {
+      ctx.fillStyle = '#908fa0';
+      ctx.font = '8px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(inst.blockName, cx, cy + rBase + 4);
+    }
+  }
+
+  if (dmMap.dragMode === 'select' && dmMap.selActive && dmMap.dragLast && dmMap.dragStart) {
+    const [x0, y0] = dmMap.dragStart;
+    const [x1, y1] = dmMap.dragLast;
+    ctx.strokeStyle = '#494bd6';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1),
+                   Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.setLineDash([]);
+  }
+}
+
+function dmMousePos(e) {
+  const rect = dmMap.canvas.getBoundingClientRect();
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+function dmOnMouseDown(e) {
+  const pos = dmMousePos(e);
+  if (e.button === 2) {
+    dmMap.dragMode = 'pan';
+    dmMap.dragLast = pos;
+    dmMap.canvas.style.cursor = 'grabbing';
+  } else if (e.button === 0) {
+    dmMap.dragMode = 'select';
+    dmMap.dragStart = pos;
+    dmMap.dragLast = pos;
+    dmMap.selActive = false;
+  }
+}
+
+function dmOnMouseMove(e) {
+  if (!dmMap.dragMode) return;
+  const pos = dmMousePos(e);
+  if (dmMap.dragMode === 'pan') {
+    const dx = pos[0] - dmMap.dragLast[0];
+    const dy = pos[1] - dmMap.dragLast[1];
+    dmMap.panX += dx;
+    dmMap.panY += dy;
+    dmMap.dragLast = pos;
+    dmRedraw();
+  } else if (dmMap.dragMode === 'select') {
+    dmMap.dragLast = pos;
+    const [x0, y0] = dmMap.dragStart;
+    if (Math.hypot(pos[0] - x0, pos[1] - y0) > 5) dmMap.selActive = true;
+    if (dmMap.selActive) dmRedraw();
+  }
+}
+
+function dmOnMouseUp() {
+  if (!dmMap.dragMode) return;
+  if (dmMap.dragMode === 'pan') {
+    dmMap.dragMode = null;
+    dmMap.canvas.style.cursor = 'crosshair';
+    return;
+  }
+  if (dmMap.dragMode === 'select') {
+    if (dmMap.selActive) {
+      const [x0, y0] = dmMap.dragStart;
+      const [x1, y1] = dmMap.dragLast;
+      const rx0 = Math.min(x0, x1), rx1 = Math.max(x0, x1);
+      const ry0 = Math.min(y0, y1), ry1 = Math.max(y0, y1);
+      let changed = false;
+      for (const inst of dmMap.instances) {
+        const [cx, cy] = dmW2C(inst.x, inst.y);
+        if (cx >= rx0 && cx <= rx1 && cy >= ry0 && cy <= ry1) {
+          dmApplyPaint(inst.blockName, inst.idx);
+          changed = true;
+        }
+      }
+      if (changed) dmUpdateBadges();
+    } else {
+      const threshold = Math.max(10, Math.round(dmMap.scale * 0.8));
+      let best = null, bestD = threshold;
+      for (const inst of dmMap.instances) {
+        const [cx, cy] = dmW2C(inst.x, inst.y);
+        const d = Math.hypot(dmMap.dragLast[0] - cx, dmMap.dragLast[1] - cy);
+        if (d < bestD) { bestD = d; best = inst; }
+      }
+      if (best) {
+        dmApplyPaint(best.blockName, best.idx);
+        dmUpdateBadges();
+      }
+    }
+    dmMap.dragMode = null;
+    dmMap.selActive = false;
+    dmMap.dragStart = null;
+    dmRedraw();
+  }
+}
+
+function dmOnWheel(e) {
+  e.preventDefault();
+  const pos = dmMousePos(e);
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+  const w = dmMap.canvas.width, h = dmMap.canvas.height;
+  const mxWorld = (pos[0] - w / 2 - dmMap.panX) / dmMap.scale + dmMap.worldCx;
+  const myWorld = -(pos[1] - h / 2 - dmMap.panY) / dmMap.scale + dmMap.worldCy;
+  dmMap.scale *= factor;
+  dmMap.panX = pos[0] - w / 2 - (mxWorld - dmMap.worldCx) * dmMap.scale;
+  dmMap.panY = pos[1] - h / 2 + (myWorld - dmMap.worldCy) * dmMap.scale;
+  dmRedraw();
+}
+
+function dmApplyPaint(blockName, idx) {
+  const mode = dmMap.paintMode;
+  const key = String(idx);
+  if (mode === 'INHERIT') {
+    if (dmMap.overrides[blockName]) {
+      delete dmMap.overrides[blockName][key];
+      if (Object.keys(dmMap.overrides[blockName]).length === 0) delete dmMap.overrides[blockName];
+    }
+    return;
+  }
+  if (!dmMap.overrides[blockName]) dmMap.overrides[blockName] = {};
+  dmMap.overrides[blockName][key] = (mode === 'SKIP') ? '' : mode;
+}
+
+function dmSetPaintMode(mode) {
+  dmMap.paintMode = mode;
+  ['AP', 'LM', 'PP', 'CP', 'SKIP', 'INHERIT'].forEach(m => {
+    const btn = document.getElementById('dm-paint-btn-' + m);
+    if (!btn) return;
+    btn.classList.remove('active-ap', 'active-lm', 'active-pp', 'active-cp', 'active-skip', 'active-inherit');
+    if (m === mode) btn.classList.add('active-' + m.toLowerCase());
+  });
+}
+
+function dmUpdateBadges() {
+  const defaults = dmBlockDefaults();
+  const counts = { AP: 0, LM: 0, PP: 0, CP: 0 };
+  let overrideCount = 0;
+  for (const inst of dmMap.instances) {
+    const type = dmEffectiveType(inst.blockName, inst.idx, defaults);
+    if (type) counts[type]++;
+  }
+  Object.values(dmMap.overrides).forEach(byIdx => { overrideCount += Object.keys(byIdx).length; });
+
+  document.getElementById('dm-count-ap').textContent = counts.AP;
+  document.getElementById('dm-count-lm').textContent = counts.LM;
+  document.getElementById('dm-count-pp').textContent = counts.PP;
+  document.getElementById('dm-count-cp').textContent = counts.CP;
+  document.getElementById('dm-count-ov').textContent = overrideCount;
+}
+
+function dmClearOverrides() {
+  dmMap.overrides = {};
+  dmUpdateBadges();
+  dmRedraw();
 }

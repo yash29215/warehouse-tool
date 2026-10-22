@@ -716,6 +716,122 @@ input[type="checkbox"] {
 
 .map-toggles { display: flex; gap: 14px; align-items: center; }
 
+.map-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-mid);
+  margin-bottom: 10px;
+}
+
+.map-legend-item { display: flex; align-items: center; gap: 5px; }
+
+.map-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.map-legend-dash {
+  width: 16px;
+  height: 0;
+  border-top: 2px dashed var(--error);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.map-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-hi);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  z-index: 20;
+  max-width: 240px;
+  white-space: nowrap;
+}
+
+.map-tooltip .ok   { color: var(--success); }
+.map-tooltip .warn { color: var(--warning); }
+.map-tooltip .err  { color: var(--error); }
+
+.map-search-wrap { position: relative; flex: 1; min-width: 180px; }
+
+.map-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.45);
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 30;
+}
+
+.map-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.map-search-row:last-child { border-bottom: none; }
+.map-search-row:hover { background: rgba(128,131,255,0.12); }
+
+.map-search-type {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-lo);
+  min-width: 22px;
+}
+
+.map-search-name {
+  flex: 1;
+  color: var(--text-hi);
+  font-family: var(--ff-mono);
+}
+
+.map-search-tag { font-size: 10px; font-weight: 600; }
+.map-search-tag.ok      { color: var(--success); }
+.map-search-tag.warn    { color: var(--warning); }
+.map-search-tag.err     { color: var(--error); }
+.map-search-tag.removed { color: var(--text-lo); }
+
+.map-search-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text-lo);
+  text-align: center;
+}
+
+/* ── DWG viewer paint modes (AP/LM/PP/CP + skip/inherit) ── */
+.tag-btn.active-ap      { background: #302f87; border-color: var(--accent-alt); color: var(--accent-alt); }
+.tag-btn.active-lm      { background: #166534; border-color: var(--success);    color: var(--success); }
+.tag-btn.active-pp      { background: #78350f; border-color: var(--warning);    color: var(--warning); }
+.tag-btn.active-cp      { background: #164e63; border-color: #06b6d4;           color: #06b6d4; }
+.tag-btn.active-skip    { background: #7f1d1d; border-color: var(--error);      color: var(--error); }
+.tag-btn.active-inherit { background: var(--bg-input); border-color: var(--text-lo); color: var(--text-mid); }
+
+.mbadge-ap { background: rgba(128,131,255,0.15); color: var(--accent-alt); }
+.mbadge-pp { background: rgba(245,158,11,0.15);  color: var(--warning); }
+.mbadge-cp { background: rgba(6,182,212,0.15);   color: #06b6d4; }
+.mbadge-ov { background: rgba(255,255,255,0.08); color: var(--text-mid); }
+
 /* ── Server file picker modal ── */
 .picker-overlay {
   position: fixed; inset: 0;

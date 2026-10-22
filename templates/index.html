@@ -31,11 +31,7 @@
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
       <nav class="sidebar-nav">
-        <button class="nav-item active" data-tab="each-pick" onclick="showTab('each-pick')">
-          <span class="nav-icon">⬡</span>
-          <span class="nav-label">Each Pick</span>
-        </button>
-        <button class="nav-item" data-tab="case-pick" onclick="showTab('case-pick')">
+        <button class="nav-item active" data-tab="case-pick" onclick="showTab('case-pick')">
           <span class="nav-icon">⟠</span>
           <span class="nav-label">Case Pick</span>
         </button>
@@ -55,9 +51,13 @@
           <span class="nav-icon">⟳</span>
           <span class="nav-label">Map Sync</span>
         </button>
+        <button class="nav-item" data-tab="each-pick" onclick="showTab('each-pick')">
+          <span class="nav-icon">⬡</span>
+          <span class="nav-label">Each Pick (In Progress)</span>
+        </button>
         <button class="nav-item" data-tab="dwg-map" onclick="showTab('dwg-map')">
           <span class="nav-icon">✎</span>
-          <span class="nav-label">DWG → Map</span>
+          <span class="nav-label">DWG → Map (In Progress)</span>
         </button>
       </nav>
       <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Toggle sidebar">
@@ -69,7 +69,7 @@
     <main class="main-content">
 
       <!-- ── TAB 1: Each Pick ──────────────────────────────── -->
-      <section class="tab-page active" id="tab-each-pick">
+      <section class="tab-page" id="tab-each-pick">
         <div class="page-header">
           <h1 class="page-title">Each Pick</h1>
           <p class="page-sub">Extract WorkMarker / ResourceMarker coordinates to Excel</p>
@@ -110,7 +110,7 @@
       </section>
 
       <!-- ── TAB 2: Case Pick ──────────────────────────────── -->
-      <section class="tab-page" id="tab-case-pick">
+      <section class="tab-page active" id="tab-case-pick">
         <div class="page-header">
           <h1 class="page-title">Case Pick</h1>
           <p class="page-sub">Generate pick sequences from warehouse map</p>
@@ -498,6 +498,78 @@
           </div>
         </div>
 
+        <!-- Map viewer — auto-loads from the selected file; highlights issues once validation completes -->
+        <div class="card" id="mv-map-card" style="display:none">
+          <div class="card-label">MAP VIEWER
+            <span style="float:right;font-size:10px;color:var(--text-lo);font-weight:400;text-transform:none;letter-spacing:0">
+              Drag to pan · Scroll to zoom · Hover a point for details
+            </span>
+          </div>
+          <div class="map-toolbar" style="margin-bottom:8px">
+            <div class="map-search-wrap">
+              <input type="text" class="text-input" id="mv-search-input"
+                     placeholder="Search point name…" autocomplete="off"
+                     oninput="mvSearchInput()" onkeydown="mvSearchKeydown(event)" />
+              <div id="mv-search-results" class="map-search-results" style="display:none"></div>
+            </div>
+            <select class="select-input" id="mv-search-type" style="width:auto" onchange="mvSearchInput()">
+              <option value="">All types</option>
+              <option value="AP">AP</option>
+              <option value="LM">LM</option>
+              <option value="PP">PP</option>
+              <option value="CP">CP</option>
+            </select>
+          </div>
+          <div class="map-toolbar" style="margin-bottom:8px">
+            <div class="map-toggles">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-ap" checked onchange="mvRedraw()" />
+                <span class="toggle-label">APs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-lm" checked onchange="mvRedraw()" />
+                <span class="toggle-label">LMs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-pp" checked onchange="mvRedraw()" />
+                <span class="toggle-label">PPs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-cp" checked onchange="mvRedraw()" />
+                <span class="toggle-label">CPs</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-paths" checked onchange="mvRedraw()" />
+                <span class="toggle-label">Paths</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="mv-show-labels" onchange="mvRedraw()" />
+                <span class="toggle-label">Labels</span>
+              </label>
+            </div>
+            <div class="action-row" style="margin:0">
+              <button class="btn-ghost" onclick="mvResetView()">⌖ Reset View</button>
+            </div>
+          </div>
+          <div class="map-legend">
+            <span class="map-legend-item"><span class="map-legend-dot" style="background:var(--success)"></span>OK</span>
+            <span class="map-legend-item"><span class="map-legend-dot" style="background:var(--warning)"></span>Entry/exit issue</span>
+            <span class="map-legend-item"><span class="map-legend-dot" style="background:#ff6b6b"></span>Unreachable / connectivity gap</span>
+            <span class="map-legend-item"><span class="map-legend-dot" style="background:var(--text-lo)"></span>Removed (bidirectional-only)</span>
+            <span class="map-legend-item"><span class="map-legend-dash"></span>Broken path</span>
+          </div>
+          <div class="map-legend" style="margin-top:-4px">
+            <span class="map-legend-item">● AP</span>
+            <span class="map-legend-item">◆ LM</span>
+            <span class="map-legend-item">■ PP</span>
+            <span class="map-legend-item">▲ CP</span>
+          </div>
+          <div style="position:relative">
+            <canvas id="mv-map-canvas" style="width:100%;height:420px;cursor:grab;display:block;background:#060e20;border-radius:6px;border:1px solid var(--border);"></canvas>
+            <div id="mv-map-tooltip" class="map-tooltip" style="display:none"></div>
+          </div>
+        </div>
+
         <!-- Summary badges -->
         <div id="mv-summary" class="summary-bar" style="display:none">
           <span class="badge badge-ok" id="mv-ok-badge">✓ 0 OK</span>
@@ -843,6 +915,54 @@
               <tbody id="dm-blocks-tbody"></tbody>
             </table>
           </div>
+        </div>
+
+        <!-- Visual viewer: click/drag instances on the drawing to assign or
+             override their AP/LM/PP/CP type, instead of (or on top of) the
+             per-block-name defaults set in the table above. -->
+        <div class="card" id="dm-map-card" style="display:none">
+          <div class="card-label">VISUAL VIEWER — ASSIGN BY INSTANCE
+            <span style="float:right;font-size:10px;color:var(--text-lo);font-weight:400;text-transform:none;letter-spacing:0">
+              Left-click / drag to paint · Right-drag to pan · Scroll to zoom
+            </span>
+          </div>
+
+          <div class="map-toolbar">
+            <div class="tag-btn-group">
+              <button class="tag-btn" id="dm-paint-btn-AP"      onclick="dmSetPaintMode('AP')">AP</button>
+              <button class="tag-btn" id="dm-paint-btn-LM"      onclick="dmSetPaintMode('LM')">LM</button>
+              <button class="tag-btn" id="dm-paint-btn-PP"      onclick="dmSetPaintMode('PP')">PP</button>
+              <button class="tag-btn" id="dm-paint-btn-CP"      onclick="dmSetPaintMode('CP')">CP</button>
+              <button class="tag-btn" id="dm-paint-btn-SKIP"    onclick="dmSetPaintMode('SKIP')">✕ Skip</button>
+              <button class="tag-btn" id="dm-paint-btn-INHERIT" onclick="dmSetPaintMode('INHERIT')">↺ Inherit</button>
+            </div>
+            <div class="map-badges">
+              <span class="mbadge mbadge-ap">AP <span id="dm-count-ap">0</span></span>
+              <span class="mbadge mbadge-l">LM <span id="dm-count-lm">0</span></span>
+              <span class="mbadge mbadge-pp">PP <span id="dm-count-pp">0</span></span>
+              <span class="mbadge mbadge-cp">CP <span id="dm-count-cp">0</span></span>
+              <span class="mbadge mbadge-ov">overrides <span id="dm-count-ov">0</span></span>
+            </div>
+          </div>
+
+          <div class="map-toolbar" style="margin-bottom:8px">
+            <div class="map-toggles">
+              <label class="toggle-wrap">
+                <input type="checkbox" id="dm-show-drawing" checked onchange="dmRedraw()" />
+                <span class="toggle-label">Drawing</span>
+              </label>
+              <label class="toggle-wrap">
+                <input type="checkbox" id="dm-show-labels" onchange="dmRedraw()" />
+                <span class="toggle-label">Block names</span>
+              </label>
+            </div>
+            <div class="action-row" style="margin:0">
+              <button class="btn-ghost" onclick="dmResetView()">⌖ Reset View</button>
+              <button class="btn-ghost" onclick="dmClearOverrides()">✕ Clear Overrides</button>
+            </div>
+          </div>
+
+          <canvas id="dm-map-canvas" style="width:100%;height:420px;cursor:crosshair;display:block;background:#060e20;border-radius:6px;border:1px solid var(--border);"></canvas>
         </div>
 
         <!-- Step 2: merge selected blocks into an existing map -->

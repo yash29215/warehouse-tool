@@ -1777,6 +1777,88 @@ def get_block_attribute_tags(dxf_path, block_names):
     return result
 
 
+_BACKDROP_SKIP_TYPES = {
+    "TEXT", "MTEXT", "ATTDEF", "ATTRIB", "DIMENSION", "HATCH",
+    "INSERT", "POINT", "VIEWPORT", "XLINE", "RAY", "ACAD_PROXY_ENTITY",
+}
+
+
+def extract_dwg_backdrop(dxf_path, max_points=150_000):
+    """
+    Flattens modelspace geometry (lines, polylines, circles, arcs, splines,
+    ellipses — anything ezdxf can turn into a vertex path) into a list of
+    polylines, so the viewer can draw the actual drawing (walls, racks,
+    aisles) behind the block-instance dots instead of leaving them floating
+    on an empty background.
+
+    Deliberately skips text/dimension/hatch/point/insert entities — INSERT
+    instances are already shown as dots by the viewer (drawing their nested
+    geometry too would duplicate every block symbol as backdrop lines), and
+    the rest add visual noise without showing drawing structure.
+
+    max_points caps the total vertex count so a huge drawing can't make the
+    viewer unusably slow — once hit, remaining entities are skipped and
+    truncated=True is returned so the caller can warn the user.
+
+    Returns {"paths": [[[x, y], ...], ...], "truncated": bool}.
+    """
+    from ezdxf import disassemble
+
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    paths = []
+    total_points = 0
+    truncated = False
+
+    for e in msp:
+        if e.dxftype() in _BACKDROP_SKIP_TYPES:
+            continue
+        if total_points >= max_points:
+            truncated = True
+            break
+        try:
+            verts = list(disassemble.make_primitive(e).vertices())
+        except Exception:
+            continue
+        if len(verts) < 2:
+            continue
+        paths.append([[round(v.x, 4), round(v.y, 4)] for v in verts])
+        total_points += len(verts)
+
+    return {"paths": paths, "truncated": truncated}
+
+
+def list_block_instances(dxf_path, block_names):
+    """
+    Returns {block_name: [{"idx", "x", "y", "rot"}, ...]} — every INSERT of
+    each named block in modelspace, in document order, before any AP/LM/PP/CP
+    type has been assigned.
+
+    "idx" is a zero-based per-block-name counter in that same document order,
+    which is what the visual viewer uses to key per-instance type overrides
+    (see build_points_from_selections' `overrides` param) — it must match
+    the counting build_points_from_selections does internally.
+    """
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    wanted = set(block_names)
+    result = {name: [] for name in block_names}
+    counters = defaultdict(int)
+    for e in msp.query("INSERT"):
+        name = e.dxf.name
+        if name not in wanted:
+            continue
+        idx = counters[name]
+        counters[name] += 1
+        result[name].append({
+            "idx": idx,
+            "x": e.dxf.insert.x,
+            "y": e.dxf.insert.y,
+            "rot": e.dxf.rotation,
+        })
+    return result
+
+
 _POINT_TYPE_CLASS_NAMES = {
     "AP": "ActionPoint",
     "LM": "LocationMark",
@@ -1803,7 +1885,7 @@ def _max_existing_numbers(existing_names):
     return highest
 
 
-def build_points_from_selections(dxf_path, selections, existing_names=()):
+def build_points_from_selections(dxf_path, selections, existing_names=(), overrides=None):
     """
     selections: {block_name: {"type": "AP"|"LM"|"PP"|"CP", "attr_tag": str|None}}
     existing_names: instanceNames already present in the base map being
@@ -1811,9 +1893,17 @@ def build_points_from_selections(dxf_path, selections, existing_names=()):
     after the highest existing number per type instead of restarting at 1,
     which would otherwise collide with (and get silently skipped as
     duplicates of) real points already in the map.
+    overrides: {block_name: {str(idx): "AP"|"LM"|"PP"|"CP"|""}} — per-instance
+    exceptions made in the visual viewer, keyed by the same zero-based
+    per-block-name document-order "idx" that list_block_instances returns.
+    A type string here overrides that one instance's type regardless of
+    selections[block_name]; "" explicitly excludes that one instance even
+    when selections[block_name] has a type. An instance with no entry here
+    just inherits selections[block_name] (or is skipped if that's absent too).
 
-    Finds every INSERT of each selected block in modelspace and turns it into
-    an advancedPointList-shaped dict matching the real .smap schema:
+    Finds every INSERT of each selected/overridden block in modelspace and
+    turns the ones that end up with an effective type into
+    advancedPointList-shaped dicts matching the real .smap schema:
     {"className", "instanceName", "pos": {"x", "y"}, "dir", "property"}.
 
     instanceName comes from the chosen attribute's value on that instance
@@ -1830,22 +1920,34 @@ def build_points_from_selections(dxf_path, selections, existing_names=()):
     """
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
+    overrides = overrides or {}
 
     points = []
     warnings = []
     counters = defaultdict(int, _max_existing_numbers(existing_names))
     default_property = [{"key": "spin", "type": "bool", "value": "ZmFsc2U=", "boolValue": False}]
 
-    for block_name, sel in selections.items():
-        ptype = sel.get("type")
-        class_name = _POINT_TYPE_CLASS_NAMES.get(ptype)
-        if class_name is None:
-            continue
+    for block_name in set(selections) | set(overrides):
+        sel = selections.get(block_name, {})
+        default_type = sel.get("type")
         attr_tag = sel.get("attr_tag") or None
+        block_overrides = overrides.get(block_name, {})
 
+        instance_idx = 0
         for e in msp.query("INSERT"):
             if e.dxf.name != block_name:
                 continue
+            idx = instance_idx
+            instance_idx += 1
+
+            key = str(idx)
+            ptype = block_overrides[key] if key in block_overrides else default_type
+            if not ptype:
+                continue
+            class_name = _POINT_TYPE_CLASS_NAMES.get(ptype)
+            if class_name is None:
+                continue
+
             x, y = e.dxf.insert.x, e.dxf.insert.y
             dir_rad = math.radians(e.dxf.rotation)
             attribs = {a.dxf.tag: a.dxf.text for a in e.attribs}

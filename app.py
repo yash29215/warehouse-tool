@@ -1484,6 +1484,18 @@ def dwg_map_list_blocks():
                                      "msg": "Reading block attributes…"})
             block_attrs = wl.get_block_attribute_tags(dxf_path, blocks)
 
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "Locating block instances for the visual viewer…"})
+            instances = wl.list_block_instances(dxf_path, blocks)
+
+            _push_event(stream_id, {"type": "log", "level": "info",
+                                     "msg": "Rendering drawing geometry for the viewer backdrop…"})
+            backdrop = wl.extract_dwg_backdrop(dxf_path)
+            if backdrop["truncated"]:
+                _push_event(stream_id, {"type": "log", "level": "warn",
+                                         "msg": "Drawing is very large — backdrop shows a partial "
+                                                "render (block instances are still complete)."})
+
             # Keep a copy so step 2 (generate-smap) can re-read instance
             # positions/attributes without the user re-uploading the DWG.
             cache_token = uuid.uuid4().hex
@@ -1493,6 +1505,7 @@ def dwg_map_list_blocks():
             _push_event(stream_id, {"type": "log", "level": "ok", "msg": "Done."})
             _push_event(stream_id, {"type": "result", "blocks": blocks, "count": len(blocks),
                                      "previews": previews, "block_attrs": block_attrs,
+                                     "instances": instances, "backdrop": backdrop,
                                      "cache_token": cache_token})
         except Exception as e:
             _push_event(stream_id, {"type": "log", "level": "err", "msg": str(e)})
@@ -1540,9 +1553,10 @@ def dwg_map_stream(stream_id):
 @app.route("/api/dwg-map/generate-smap", methods=["POST"])
 def dwg_map_generate_smap():
     """Step 2 of DWG -> SMAP: given the block->type/attribute selections made
-    against a previously-listed DWG (see cache_token) and an uploaded base
-    .smap file, appends one point per block instance into that file's
-    advancedPointList and returns the merged file for download."""
+    against a previously-listed DWG (see cache_token), any per-instance
+    overrides painted in the visual viewer, and an uploaded base .smap file,
+    appends one point per block instance into that file's advancedPointList
+    and returns the merged file for download."""
     if "base_smap" not in request.files:
         return jsonify({"error": "No base .smap file uploaded"}), 400
 
@@ -1558,7 +1572,11 @@ def dwg_map_generate_smap():
         selections = json.loads(request.form.get("selections", "{}"))
     except (ValueError, TypeError) as e:
         return jsonify({"error": f"Invalid selections: {e}"}), 400
-    if not selections:
+    try:
+        overrides = json.loads(request.form.get("overrides", "{}"))
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": f"Invalid overrides: {e}"}), 400
+    if not selections and not overrides:
         return jsonify({"error": "Select at least one block and assign it a type"}), 400
 
     base_path = _save_upload(request.files["base_smap"], "basesmap")
@@ -1574,7 +1592,7 @@ def dwg_map_generate_smap():
 
     existing_names = {p.get("instanceName") for p in base_data.get("advancedPointList", [])}
     try:
-        points, warnings = wl.build_points_from_selections(cache_path, selections, existing_names)
+        points, warnings = wl.build_points_from_selections(cache_path, selections, existing_names, overrides)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
